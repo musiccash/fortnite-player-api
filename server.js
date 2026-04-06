@@ -2,11 +2,10 @@ const express = require("express");
 const fetch = require("node-fetch");
 const app = express();
 
-// 🔥 CONFIG MAPS (MODIFIABLE)
 const maps = {
-  shadow: "2327-7349-9384",
-  prison: "XXXX-XXXX-XXXX",
-  city: "XXXX-XXXX-XXXX"
+  shadow: "2327-7349-9384", // déjà un code
+  prison: "1234-5678-9012", // exemple de code à remplacer
+  city: "3456-7890-1234"    // exemple de code à remplacer
 };
 
 // 🔥 CACHE (évite spam Fortnite.gg)
