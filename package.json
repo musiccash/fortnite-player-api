@@ -9,6 +9,6 @@
     "express": "^4.18.2",
     "node-fetch": "^2.6.7",
     "puppeteer-core": "^22.0.0",
-    "@sparticuz/chromium": "^101.0.0"
+    "@sparticuz/chromium": "^115.0.0"
   }
 }
