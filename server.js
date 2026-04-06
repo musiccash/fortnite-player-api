@@ -12,24 +12,8 @@ const maps = {
 let cache = {};
 
 async function fetchPlayers(mapCode) {
-  try {
-    const res = await fetch(
-      `https://fortnite.gg/player-count-graph?range=1h&id=${mapCode}`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-          "Referer": "https://fortnite.gg/"
-        }
-      }
-    );
-
-    const data = await res.json();
-    const values = data?.data?.values || [];
-
-    return values.length ? values[values.length - 1] : 0;
-  } catch (err) {
-    return 0;
-  }
+  // Simule un nombre de joueurs aléatoire entre 100 et 500
+  return Math.floor(Math.random() * 400 + 100);
 }
 
 // 🔥 ROUTE PRINCIPALE
