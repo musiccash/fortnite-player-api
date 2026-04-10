@@ -5,16 +5,26 @@ import { chromium } from "playwright";
 const app = express();
 app.use(cors());
 
-const PORT = process.env.PORT || 3000;
+// Railway injecte le port, sinon 8080 par défaut
+const PORT = process.env.PORT || 8080;
 const URL = "https://fortnite.gg/island/2327-7349-9384";
 
+// --- ROUTES ---
+
+// 1. Route racine pour le Healthcheck de Railway
+app.get("/", (req, res) => {
+    res.status(200).send("API Statut: OK. Utilisez /api/players pour les données.");
+});
+
+// 2. Route principale pour le nombre de joueurs
 app.get("/api/players", async (req, res) => {
     let browser;
     try {
-        // Railway a assez de puissance pour lancer le navigateur proprement
+        console.log(`[${new Date().toLocaleTimeString()}] Lancement du navigateur...`);
+        
         browser = await chromium.launch({ 
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox'] 
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
         });
 
         const context = await browser.newContext({
@@ -23,62 +33,53 @@ app.get("/api/players", async (req, res) => {
 
         const page = await context.newPage();
 
-        // On bloque les pubs et images pour charger l'essentiel
+        // Blocage des images pour gagner de la RAM sur Railway
         await page.route('**/*', (route) => {
-            const type = route.request().resourceType();
-            if (['image', 'media', 'font'].includes(type)) {
+            if (['image', 'media', 'font'].includes(route.request().resourceType())) {
                 route.abort();
             } else {
                 route.continue();
             }
         });
 
-        // 1. On attend que le réseau soit calme (plus lent mais plus sûr)
-        await page.goto(URL, { waitUntil: "networkidle", timeout: 60000 });
+        console.log("Accès à fortnite.gg...");
+        await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-        // 2. On attend 5 secondes de plus pour que les chiffres s'actualisent sur la page
+        // On attend que la page s'initialise
         await page.waitForTimeout(5000);
 
-        // 3. Extraction de haute précision
         const playersNow = await page.evaluate(() => {
-            // On cherche spécifiquement les conteneurs de statistiques
-            const statsContainers = Array.from(document.querySelectorAll('div'));
-            
-            // On trouve celui qui contient le texte cible
-            const liveBlock = statsContainers.find(el => {
-                const text = el.innerText.trim();
-                return text === "Players Right Now" || text === "Joueurs actuels";
-            });
+            // On cherche le bloc qui contient le texte spécifique
+            const divs = Array.from(document.querySelectorAll('div, span, b'));
+            const target = divs.find(el => 
+                el.innerText.trim() === "Players Right Now" || 
+                el.innerText.trim() === "Joueurs actuels"
+            );
 
-            if (liveBlock && liveBlock.parentElement) {
-                // On récupère le texte du bloc parent pour isoler le chiffre
-                const fullText = liveBlock.parentElement.innerText;
-                
-                // On enlève les mots pour ne garder que le chiffre
-                const rawValue = fullText
+            if (target && target.parentElement) {
+                const parentText = target.parentElement.innerText;
+                // On nettoie tout sauf les chiffres
+                const cleanValue = parentText
                     .replace("Players Right Now", "")
                     .replace("Joueurs actuels", "")
-                    .replace(/[^\d]/g, ""); // Garde uniquement les chiffres
+                    .replace(/[^\d]/g, "");
                 
-                return rawValue ? parseInt(rawValue, 10) : "N/A";
+                return cleanValue ? parseInt(cleanValue, 10) : null;
             }
-            return "N/A";
+            return null;
         });
 
         await browser.close();
 
-        // VERIFICATION FINALE : Si le chiffre est l'ID de la map (2327...), c'est une erreur
-        let result = playersNow;
+        // SÉCURITÉ ANTI-ID : Si le chiffre commence par 2327 (ton ID de map), on l'annule
+        let finalValue = playersNow;
         if (playersNow && playersNow.toString().startsWith("2327")) {
-            result = "Chargement...";
+            console.log("Alerte: Confusion avec l'ID de la map detectée.");
+            finalValue = "N/A";
         }
 
-        console.log(`[${new Date().toLocaleTimeString()}] Joueurs en ligne : ${result}`);
-        
-        res.json({ 
-            ok: true, 
-            playersNow: result 
-        });
+        console.log(`Résultat envoyé : ${finalValue}`);
+        res.json({ ok: true, playersNow: finalValue });
 
     } catch (err) {
         if (browser) await browser.close();
@@ -87,6 +88,8 @@ app.get("/api/players", async (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`🚀 API Railway en ligne sur le port ${PORT}`);
+// --- DÉMARRAGE ---
+// Important: '0.0.0.0' est vital pour Railway
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Serveur en ligne sur le port ${PORT}`);
 });
