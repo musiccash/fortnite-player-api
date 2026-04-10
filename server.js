@@ -11,7 +11,6 @@ const URL = "https://fortnite.gg/island/2327-7349-9384";
 app.get("/api/players", async (req, res) => {
     let browser;
     try {
-        // 1. Lancement optimisé pour les serveurs (Linux/Render)
         browser = await chromium.launch({ 
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
@@ -23,58 +22,59 @@ app.get("/api/players", async (req, res) => {
 
         const page = await context.newPage();
 
-        // 2. OPTIMISATION : On bloque les images, CSS et pubs pour éviter le Timeout
+        // 1. On bloque le superflu pour la rapidité
         await page.route('**/*', (route) => {
             const type = route.request().resourceType();
-            if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
+            if (['image', 'media', 'font'].includes(type)) {
                 route.abort();
             } else {
                 route.continue();
             }
         });
 
-        // 3. Navigation : On attend juste que le DOM soit chargé (beaucoup plus rapide)
+        // 2. Navigation
         await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-        // 4. Attente chirurgicale du texte
-        // On attend que le sélecteur contenant le texte apparaisse
-        await page.waitForSelector('text=/JOUEURS ACTUELS|PLAYERS RIGHT NOW/i', { timeout: 15000 });
+        // 3. Attente que le bloc des statistiques soit chargé
+        await page.waitForSelector('.island-stats', { timeout: 15000 });
 
-        // 5. Extraction
-        const result = await page.evaluate(() => {
-            function clean(v) {
-                return v ? v.replace(/[^\d]/g, "") : null;
+        // 4. Extraction Ciblée
+        const playersNow = await page.evaluate(() => {
+            // On cherche spécifiquement le titre "Players Right Now" ou "Joueurs actuels"
+            const allElements = Array.from(document.querySelectorAll('.island-stats > div'));
+            
+            const statsBlock = allElements.find(el => {
+                const text = el.innerText.toUpperCase();
+                return text.includes("PLAYERS RIGHT NOW") || text.includes("JOUEURS ACTUELS");
+            });
+
+            if (statsBlock) {
+                // Le chiffre est généralement dans une balise <b> ou <span> à l'intérieur du bloc
+                const numberEl = statsBlock.querySelector('b, span, div:nth-child(2)');
+                if (numberEl) {
+                    const value = numberEl.innerText.replace(/[^\d]/g, "");
+                    return value ? parseInt(value, 10) : "N/A";
+                }
             }
 
-            const text = document.body.innerText;
-            
-            // Tentative avec une Regex globale robuste
-            const match = text.match(/(?:JOUEURS ACTUELS|PLAYERS RIGHT NOW|PLAYERS)[\s\n\r]*([0-9\s,]+)/i);
-            
-            if (match && match[1]) {
-                const val = clean(match[1]);
-                return val ? parseInt(val, 10) : "N/A";
-            }
-            return "N/A";
+            // Plan B : Recherche par texte de proximité si la structure change
+            const backupMatch = document.body.innerText.match(/(?:Players Right Now|Joueurs actuels)\s*([\d,]+)/i);
+            return backupMatch ? parseInt(backupMatch[1].replace(/[^\d]/g, ""), 10) : "N/A";
         });
 
         await browser.close();
 
-        console.log(`[${new Date().toLocaleTimeString()}] Joueurs détectés : ${result}`);
+        console.log(`[${new Date().toLocaleTimeString()}] Résultat : ${playersNow}`);
         
         res.json({ 
-            ok: true,
-            playersNow: result 
+            ok: true, 
+            playersNow: playersNow 
         });
 
     } catch (err) {
         if (browser) await browser.close();
         console.error("ERREUR:", err.message);
-        res.status(500).json({ 
-            ok: false, 
-            playersNow: "Erreur", 
-            error: err.message 
-        });
+        res.status(500).json({ ok: false, playersNow: "Erreur", error: err.message });
     }
 });
 
