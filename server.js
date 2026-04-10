@@ -22,7 +22,7 @@ app.get("/api/players", async (req, res) => {
 
         const page = await context.newPage();
 
-        // 1. On bloque le superflu pour la rapidité
+        // 1. On bloque l'inutile pour aller vite
         await page.route('**/*', (route) => {
             const type = route.request().resourceType();
             if (['image', 'media', 'font'].includes(type)) {
@@ -35,40 +35,41 @@ app.get("/api/players", async (req, res) => {
         // 2. Navigation
         await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-        // 3. Attente que le bloc des statistiques soit chargé
-        await page.waitForSelector('.island-stats', { timeout: 15000 });
+        // 3. On attend que le texte "Joueurs" soit présent n'importe où sur la page
+        await page.waitForFunction(() => {
+            return document.body.innerText.toLowerCase().includes("joueur") || 
+                   document.body.innerText.toLowerCase().includes("player");
+        }, { timeout: 20000 });
 
-        // 4. Extraction Ciblée
+        // 4. Extraction via une recherche textuelle globale
         const playersNow = await page.evaluate(() => {
-            // On cherche spécifiquement le titre "Players Right Now" ou "Joueurs actuels"
-            const allElements = Array.from(document.querySelectorAll('.island-stats > div'));
+            // Cette fonction cherche un nombre situé après "Joueurs actuels" ou "Players right now"
+            const text = document.body.innerText;
             
-            const statsBlock = allElements.find(el => {
-                const text = el.innerText.toUpperCase();
-                return text.includes("PLAYERS RIGHT NOW") || text.includes("JOUEURS ACTUELS");
-            });
-
-            if (statsBlock) {
-                // Le chiffre est généralement dans une balise <b> ou <span> à l'intérieur du bloc
-                const numberEl = statsBlock.querySelector('b, span, div:nth-child(2)');
-                if (numberEl) {
-                    const value = numberEl.innerText.replace(/[^\d]/g, "");
-                    return value ? parseInt(value, 10) : "N/A";
-                }
+            // Regex qui cherche spécifiquement le bloc de stats
+            // Elle cherche "Players Right Now" ou "Joueurs actuels" suivi de n'importe quoi (max 50 caractères) puis un nombre
+            const regex = /(?:Players Right Now|Joueurs actuels|Players|Joueurs)[\s\n\r]{1,50}([0-9,.\s]+)/i;
+            const match = text.match(regex);
+            
+            if (match && match[1]) {
+                // On nettoie le résultat pour ne garder que les chiffres
+                const cleaned = match[1].replace(/[^\d]/g, "");
+                return cleaned ? parseInt(cleaned, 10) : "N/A";
             }
-
-            // Plan B : Recherche par texte de proximité si la structure change
-            const backupMatch = document.body.innerText.match(/(?:Players Right Now|Joueurs actuels)\s*([\d,]+)/i);
-            return backupMatch ? parseInt(backupMatch[1].replace(/[^\d]/g, ""), 10) : "N/A";
+            return "N/A";
         });
 
         await browser.close();
 
-        console.log(`[${new Date().toLocaleTimeString()}] Résultat : ${playersNow}`);
+        // Si on récupère un nombre trop grand (ex: l'ID de la map), on le filtre
+        // L'ID de ta map commence par 2327..., donc si c'est ce nombre, on met N/A
+        const finalResult = (playersNow > 1000000) ? "N/A" : playersNow;
+
+        console.log(`[${new Date().toLocaleTimeString()}] Joueurs : ${finalResult}`);
         
         res.json({ 
             ok: true, 
-            playersNow: playersNow 
+            playersNow: finalResult 
         });
 
     } catch (err) {
