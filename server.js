@@ -9,9 +9,46 @@ const PORT = process.env.PORT || 3000;
 const URL = "https://fortnite.gg/island/2327-7349-9384";
 
 app.get("/api/players", async (req, res) => {
-    let browser;
-    try {
-        browser = await chromium.launch({ 
+  let browser;
+  try {
+    // Lancement du navigateur
+    browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    });
+    const page = await context.newPage();
+
+    // Aller sur la page et attendre que le contenu soit chargé
+    await page.goto(URL, { waitUntil: "networkidle", timeout: 30000 });
+
+    const playersNow = await page.evaluate(() => {
+      const text = document.body.innerText;
+      // Regex pour attraper le nombre après "JOUEURS ACTUELS" ou "PLAYERS RIGHT NOW"
+      const match = text.match(/(?:JOUEURS ACTUELS|PLAYERS RIGHT NOW)[\s\n]*([\d\s,]+)/i);
+      if (match && match[1]) {
+        return parseInt(match[1].replace(/[^\d]/g, ""), 10);
+      }
+      return "N/A";
+    });
+
+    await browser.close();
+
+    console.log(`[LOG] Requête reçue - Joueurs en ligne : ${playersNow}`);
+    
+    res.json({ 
+      ok: true,
+      playersNow: playersNow 
+    });
+
+  } catch (err) {
+    if (browser) await browser.close();
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Serveur actif : http://localhost:${PORT}/api/players`);
+});
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
         });
