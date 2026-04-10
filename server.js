@@ -9,48 +9,12 @@ const PORT = process.env.PORT || 3000;
 const URL = "https://fortnite.gg/island/2327-7349-9384";
 
 app.get("/api/players", async (req, res) => {
-  let browser;
-  try {
-    // Lancement du navigateur
-    browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    });
-    const page = await context.newPage();
-
-    // Aller sur la page et attendre que le contenu soit chargé
-    await page.goto(URL, { waitUntil: "networkidle", timeout: 30000 });
-
-    const playersNow = await page.evaluate(() => {
-      const text = document.body.innerText;
-      // Regex pour attraper le nombre après "JOUEURS ACTUELS" ou "PLAYERS RIGHT NOW"
-      const match = text.match(/(?:JOUEURS ACTUELS|PLAYERS RIGHT NOW)[\s\n]*([\d\s,]+)/i);
-      if (match && match[1]) {
-        return parseInt(match[1].replace(/[^\d]/g, ""), 10);
-      }
-      return "N/A";
-    });
-
-    await browser.close();
-
-    console.log(`[LOG] Requête reçue - Joueurs en ligne : ${playersNow}`);
-    
-    res.json({ 
-      ok: true,
-      playersNow: playersNow 
-    });
-
-  } catch (err) {
-    if (browser) await browser.close();
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`🚀 Serveur actif : http://localhost:${PORT}/api/players`);
-});
+    let browser;
+    try {
+        // Railway a assez de puissance pour lancer le navigateur proprement
+        browser = await chromium.launch({ 
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+            args: ['--no-sandbox', '--disable-setuid-sandbox'] 
         });
 
         const context = await browser.newContext({
@@ -59,74 +23,61 @@ app.listen(PORT, () => {
 
         const page = await context.newPage();
 
-        // On ne bloque QUE les images/polices pour garder le CSS (important pour trouver les blocs)
+        // On bloque les pubs et images pour charger l'essentiel
         await page.route('**/*', (route) => {
-            if (['image', 'font', 'media'].includes(route.request().resourceType())) {
+            const type = route.request().resourceType();
+            if (['image', 'media', 'font'].includes(type)) {
                 route.abort();
             } else {
                 route.continue();
             }
         });
 
-        // 1. Chargement complet (on prend notre temps)
+        // 1. On attend que le réseau soit calme (plus lent mais plus sûr)
         await page.goto(URL, { waitUntil: "networkidle", timeout: 60000 });
 
-        // 2. Petite pause pour laisser les scripts JS du site calculer le nombre
+        // 2. On attend 5 secondes de plus pour que les chiffres s'actualisent sur la page
         await page.waitForTimeout(5000);
 
-        // 3. Extraction de précision
+        // 3. Extraction de haute précision
         const playersNow = await page.evaluate(() => {
-            // Méthode A : Chercher dans les boîtes de statistiques de Fortnite.gg
-            const blocks = Array.from(document.querySelectorAll('.island-stats > div, .island-stat'));
+            // On cherche spécifiquement les conteneurs de statistiques
+            const statsContainers = Array.from(document.querySelectorAll('div'));
             
-            for (let block of blocks) {
-                const title = block.innerText.toUpperCase();
-                if (title.includes("PLAYERS RIGHT NOW") || title.includes("JOUEURS ACTUELS")) {
-                    // On cherche le chiffre à l'intérieur de CE bloc précis
-                    const match = block.innerText.match(/(\d[\d\s,]*)/);
-                    if (match) {
-                        const val = match[0].replace(/[^\d]/g, "");
-                        return parseInt(val, 10);
-                    }
-                }
-            }
-
-            // Méthode B : Si la structure a changé, on cherche le texte et on remonte au parent
-            const allElements = Array.from(document.querySelectorAll('div, span, b, p'));
-            const targetLabel = allElements.find(el => {
-                const t = el.innerText.trim();
-                return t === "Players Right Now" || t === "Joueurs actuels";
+            // On trouve celui qui contient le texte cible
+            const liveBlock = statsContainers.find(el => {
+                const text = el.innerText.trim();
+                return text === "Players Right Now" || text === "Joueurs actuels";
             });
 
-            if (targetLabel) {
-                // On regarde dans le parent direct pour trouver le chiffre associé
-                const content = targetLabel.parentElement.innerText;
-                const match = content.match(/(\d[\d\s,]*)/);
-                if (match) {
-                    return parseInt(match[0].replace(/[^\d]/g, ""), 10);
-                }
+            if (liveBlock && liveBlock.parentElement) {
+                // On récupère le texte du bloc parent pour isoler le chiffre
+                const fullText = liveBlock.parentElement.innerText;
+                
+                // On enlève les mots pour ne garder que le chiffre
+                const rawValue = fullText
+                    .replace("Players Right Now", "")
+                    .replace("Joueurs actuels", "")
+                    .replace(/[^\d]/g, ""); // Garde uniquement les chiffres
+                
+                return rawValue ? parseInt(rawValue, 10) : "N/A";
             }
-
             return "N/A";
         });
 
         await browser.close();
 
-        // VERIFICATION FINALE : On élimine l'ID de la map (2327...) ou les chiffres trop longs
-        let finalResult = playersNow;
-        if (typeof playersNow === 'number') {
-            const strVal = playersNow.toString();
-            // Si c'est l'ID de la map ou un chiffre bizarre de plus de 6 chiffres (rare pour une map seule)
-            if (strVal.startsWith("2327") || strVal.length > 6) {
-                finalResult = "En attente..."; 
-            }
+        // VERIFICATION FINALE : Si le chiffre est l'ID de la map (2327...), c'est une erreur
+        let result = playersNow;
+        if (playersNow && playersNow.toString().startsWith("2327")) {
+            result = "Chargement...";
         }
 
-        console.log(`[${new Date().toLocaleTimeString()}] Donnée réelle : ${finalResult}`);
+        console.log(`[${new Date().toLocaleTimeString()}] Joueurs en ligne : ${result}`);
         
         res.json({ 
             ok: true, 
-            playersNow: finalResult 
+            playersNow: result 
         });
 
     } catch (err) {
@@ -137,5 +88,5 @@ app.listen(PORT, () => {
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 Serveur en ligne sur le port ${PORT}`);
+    console.log(`🚀 API Railway en ligne sur le port ${PORT}`);
 });
