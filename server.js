@@ -5,91 +5,83 @@ import { chromium } from "playwright";
 const app = express();
 app.use(cors());
 
-// Railway injecte le port, sinon 8080 par défaut
+// Railway injecte le PORT, on écoute sur 0.0.0.0 pour être visible
 const PORT = process.env.PORT || 8080;
 const URL = "https://fortnite.gg/island/2327-7349-9384";
 
-// --- ROUTES ---
+// Route Santé pour Railway (évite que le serveur s'arrête)
+app.get("/", (req, res) => res.send("✅ API Opérationnelle"));
 
-// 1. Route racine pour le Healthcheck de Railway
-app.get("/", (req, res) => {
-    res.status(200).send("API Statut: OK. Utilisez /api/players pour les données.");
-});
-
-// 2. Route principale pour le nombre de joueurs
 app.get("/api/players", async (req, res) => {
-    let browser;
-    try {
-        console.log(`[${new Date().toLocaleTimeString()}] Lancement du navigateur...`);
-        
-        browser = await chromium.launch({ 
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
-        });
+  let browser;
+  try {
+    // 1. Lancement avec arguments spéciaux pour le Cloud/Docker
+    browser = await chromium.launch({ 
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+    });
 
-        const context = await browser.newContext({
-            userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        });
+    const context = await browser.newContext({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      viewport: { width: 1280, height: 720 }
+    });
+    const page = await context.newPage();
 
-        const page = await context.newPage();
+    // 2. Navigation (on attend que le gros du contenu soit là)
+    console.log("Chargement de la page...");
+    await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45000 });
 
-        // Blocage des images pour gagner de la RAM sur Railway
-        await page.route('**/*', (route) => {
-            if (['image', 'media', 'font'].includes(route.request().resourceType())) {
-                route.abort();
-            } else {
-                route.continue();
-            }
-        });
+    // 3. On laisse 5 secondes de plus pour que les chiffres s'allument
+    await page.waitForTimeout(5000);
 
-        console.log("Accès à fortnite.gg...");
-        await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    // 4. Extraction chirurgicale améliorée
+    const result = await page.evaluate(() => {
+      const elements = Array.from(document.querySelectorAll('div, span, p, b, font'));
+      
+      // On cherche l'étiquette
+      const labelElement = elements.find(el => {
+        const t = el.innerText.toUpperCase().trim();
+        return t === "JOUEURS ACTUELS" || t === "PLAYERS RIGHT NOW" || t.includes("PLAYERS RIGHT NOW");
+      });
 
-        // On attend que la page s'initialise
-        await page.waitForTimeout(5000);
-
-        const playersNow = await page.evaluate(() => {
-            // On cherche le bloc qui contient le texte spécifique
-            const divs = Array.from(document.querySelectorAll('div, span, b'));
-            const target = divs.find(el => 
-                el.innerText.trim() === "Players Right Now" || 
-                el.innerText.trim() === "Joueurs actuels"
-            );
-
-            if (target && target.parentElement) {
-                const parentText = target.parentElement.innerText;
-                // On nettoie tout sauf les chiffres
-                const cleanValue = parentText
-                    .replace("Players Right Now", "")
-                    .replace("Joueurs actuels", "")
-                    .replace(/[^\d]/g, "");
-                
-                return cleanValue ? parseInt(cleanValue, 10) : null;
-            }
-            return null;
-        });
-
-        await browser.close();
-
-        // SÉCURITÉ ANTI-ID : Si le chiffre commence par 2327 (ton ID de map), on l'annule
-        let finalValue = playersNow;
-        if (playersNow && playersNow.toString().startsWith("2327")) {
-            console.log("Alerte: Confusion avec l'ID de la map detectée.");
-            finalValue = "N/A";
+      if (labelElement) {
+        // On cherche le chiffre dans le parent ou les frères
+        const containerText = labelElement.parentElement.innerText;
+        // On cherche un nombre qui n'est pas l'ID de la map (2327...)
+        const matches = containerText.match(/\d[\d\s,.]*/g);
+        if (matches) {
+          // On prend le nombre qui n'est pas "2327..."
+          const players = matches.find(m => !m.startsWith("2327"));
+          return players ? players.replace(/[^\d]/g, "") : null;
         }
+      }
 
-        console.log(`Résultat envoyé : ${finalValue}`);
-        res.json({ ok: true, playersNow: finalValue });
+      // Plan B : Recherche globale si la structure a changé
+      const bodyText = document.body.innerText;
+      const globalMatch = bodyText.match(/(?:PLAYERS RIGHT NOW|JOUEURS ACTUELS)[\s\n]*([\d\s,]+)/i);
+      return globalMatch ? globalMatch[1].replace(/[^\d]/g, "") : null;
+    });
 
-    } catch (err) {
-        if (browser) await browser.close();
-        console.error("ERREUR:", err.message);
-        res.status(500).json({ ok: false, error: err.message });
+    await browser.close();
+
+    // 5. Réponse
+    if (!result) {
+        console.log("Chiffre non trouvé, renvoi de N/A");
     }
+
+    res.json({ 
+      ok: result ? true : false,
+      playersNow: result ? parseInt(result, 10) : "N/A" 
+    });
+
+  } catch (err) {
+    if (browser) await browser.close();
+    console.error("ERREUR:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
-// --- DÉMARRAGE ---
-// Important: '0.0.0.0' est vital pour Railway
+// IMPORTANT : 0.0.0.0 pour Railway
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Serveur en ligne sur le port ${PORT}`);
+  console.log(`🚀 Serveur en ligne sur le port ${PORT}`);
 });
