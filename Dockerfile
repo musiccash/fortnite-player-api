@@ -1,5 +1,6 @@
 # On utilise l'image officielle de Microsoft qui contient TOUTES les dépendances
-FROM mcr.microsoft.com/playwright:v1.51.0-jammy
+FROM mcr.microsoft.com/playwright:v1.42.1-jammy
+
 # Dossier de travail
 WORKDIR /app
 
