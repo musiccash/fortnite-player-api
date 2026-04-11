@@ -8,12 +8,12 @@ app.use(cors());
 const PORT = process.env.PORT || 8080;
 const URL = "https://fortnite.gg/island/2327-7349-9384";
 
-app.get("/", (req, res) => res.send("🚀 API Fortnite Online - Fix PR Railway"));
+app.get("/", (req, res) => res.send("🚀 API Fortnite Online - Version Ultra-Précise Active"));
 
 app.get("/api/players", async (req, res) => {
     let browser;
     try {
-        console.log("Lancement de l'extraction précise...");
+        console.log("Lancement de l'extraction par sélecteur CSS...");
         browser = await chromium.launch({ 
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
@@ -24,51 +24,35 @@ app.get("/api/players", async (req, res) => {
         });
         const page = await context.newPage();
 
-        await page.goto(URL, { waitUntil: "networkidle", timeout: 45000 });
+        await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45000 });
 
-        // Attente forcée pour que le JS de Fortnite.gg affiche le chiffre
-        await page.waitForTimeout(8000);
+        // On attend spécifiquement que l'élément avec la classe 'js-players-now' soit là
+        try {
+            await page.waitForSelector('.js-players-now', { timeout: 15000 });
+        } catch (e) {
+            console.log("Sélecteur non trouvé, tentative d'attente classique...");
+            await page.waitForTimeout(5000);
+        }
 
         const playersNow = await page.evaluate(() => {
-            // Fonction pour vérifier si un nombre est crédible (entre 1 et 1 million, pas une année)
-            const isPlausibleCount = (n) => {
-                const num = parseInt(n.replace(/[^\d]/g, ""), 10);
-                return num > 0 && num < 1000000 && num !== 2025 && num !== 2026;
-            };
-
-            // 1. On cherche précisément l'élément qui contient le texte exact
-            const elements = Array.from(document.querySelectorAll('div, b, span'));
-            const label = elements.find(el => {
-                const t = el.innerText.trim().toUpperCase();
-                return t === "PLAYERS RIGHT NOW" || t === "JOUEURS ACTUELS";
-            });
-
-            if (label) {
-                // STRATÉGIE PR : On cherche dans les éléments frères (siblings) ou le parent direct
-                const parent = label.parentElement;
-                const siblings = Array.from(parent.children);
-                
-                for (let sibling of siblings) {
-                    const text = sibling.innerText.trim();
-                    if (isPlausibleCount(text)) {
-                        return text.replace(/[^\d]/g, "");
-                    }
-                }
-
-                // Fallback : On cherche n'importe quel chiffre crédible dans le bloc parent
-                const parentText = parent.innerText;
-                const matches = parentText.match(/\d[\d\s,.]*/g);
-                if (matches) {
-                    const count = matches.find(m => isPlausibleCount(m));
-                    if (count) return count.replace(/[^\d]/g, "");
-                }
+            // MÉTHODE 1 : On récupère l'attribut 'data-n' directement (le plus fiable)
+            const el = document.querySelector('.js-players-now');
+            if (el && el.getAttribute('data-n')) {
+                return el.getAttribute('data-n');
             }
+            
+            // MÉTHODE 2 : Si data-n est vide, on prend le texte dans le span
+            const span = document.querySelector('.js-players-now .chart-stats-title span');
+            if (span) {
+                return span.innerText.replace(/[^\d]/g, "");
+            }
+
             return null;
         });
 
         await browser.close();
         
-        console.log(`[LOG] Chiffre extrait : ${playersNow}`);
+        console.log(`[LOG] Chiffre extrait via CSS : ${playersNow}`);
 
         res.json({
             ok: playersNow !== null,
@@ -77,10 +61,11 @@ app.get("/api/players", async (req, res) => {
 
     } catch (err) {
         if (browser) await browser.close();
+        console.error("ERREUR:", err.message);
         res.status(500).json({ ok: false, error: err.message });
     }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Serveur en ligne sur le port ${PORT}`);
+    console.log(`🚀 Serveur actif sur le port ${PORT}`);
 });
