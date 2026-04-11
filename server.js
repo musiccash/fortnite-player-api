@@ -8,12 +8,12 @@ app.use(cors());
 const PORT = process.env.PORT || 8080;
 const URL = "https://fortnite.gg/island/2327-7349-9384";
 
-app.get("/", (req, res) => res.send("🚀 API Fortnite Online - Version Ultra-Précise Active"));
+app.get("/", (req, res) => res.send("🚀 API Fortnite Player Count - Logic v3.0 (Robust)"));
 
 app.get("/api/players", async (req, res) => {
     let browser;
     try {
-        console.log("Lancement de l'extraction par sélecteur CSS...");
+        console.log("Démarrage de l'extraction (Multi-méthode)...");
         browser = await chromium.launch({ 
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
@@ -24,27 +24,32 @@ app.get("/api/players", async (req, res) => {
         });
         const page = await context.newPage();
 
-        await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45000 });
+        // On attend que le réseau soit calme
+        await page.goto(URL, { waitUntil: "networkidle", timeout: 60000 });
 
-        // On attend spécifiquement que l'élément avec la classe 'js-players-now' soit là
-        try {
-            await page.waitForSelector('.js-players-now', { timeout: 15000 });
-        } catch (e) {
-            console.log("Sélecteur non trouvé, tentative d'attente classique...");
-            await page.waitForTimeout(5000);
-        }
+        // Petit délai supplémentaire de sécurité pour le rendu du JS
+        await page.waitForTimeout(5000);
 
         const playersNow = await page.evaluate(() => {
-            // MÉTHODE 1 : On récupère l'attribut 'data-n' directement (le plus fiable)
-            const el = document.querySelector('.js-players-now');
-            if (el && el.getAttribute('data-n')) {
-                return el.getAttribute('data-n');
+            // METHODE 1 : Le Span précis (le plus fiable d'après ton analyse)
+            const primarySpan = document.querySelector('.js-players-now .chart-stats-title span');
+            if (primarySpan && primarySpan.textContent) {
+                const val = primarySpan.textContent.replace(/[^\d]/g, "");
+                if (val) return val;
             }
-            
-            // MÉTHODE 2 : Si data-n est vide, on prend le texte dans le span
-            const span = document.querySelector('.js-players-now .chart-stats-title span');
-            if (span) {
-                return span.innerText.replace(/[^\d]/g, "");
+
+            // METHODE 2 : L'attribut data-n (en secours)
+            const dataElement = document.querySelector('.js-players-now');
+            if (dataElement && dataElement.getAttribute('data-n')) {
+                const val = dataElement.getAttribute('data-n');
+                if (val) return val;
+            }
+
+            // METHODE 3 : Sélecteur plus large si la structure bouge
+            const broadSpan = document.querySelector('.chart-stats-title span');
+            if (broadSpan && (broadSpan.innerText || broadSpan.textContent)) {
+                const val = (broadSpan.innerText || broadSpan.textContent).replace(/[^\d]/g, "");
+                if (val) return val;
             }
 
             return null;
@@ -52,7 +57,7 @@ app.get("/api/players", async (req, res) => {
 
         await browser.close();
         
-        console.log(`[LOG] Chiffre extrait via CSS : ${playersNow}`);
+        console.log(`[LOG] Extraction terminée. Valeur trouvée : ${playersNow}`);
 
         res.json({
             ok: playersNow !== null,
