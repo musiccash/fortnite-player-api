@@ -35,20 +35,30 @@ app.get("/api/players", async (req, res) => {
         }
 
         const playersNow = await page.evaluate(() => {
-            // MÉTHODE 1 : On récupère l'attribut 'data-n' directement (le plus fiable)
-            const el = document.querySelector('.js-players-now');
-            if (el && el.getAttribute('data-n')) {
-                return el.getAttribute('data-n');
-            }
-            
-            // MÉTHODE 2 : Si data-n est vide, on prend le texte dans le span
+            // MÉTHODE 1 : Span dans .chart-stats-title à l'intérieur de .js-players-now (structure réelle)
             const span = document.querySelector('.js-players-now .chart-stats-title span');
             if (span) {
-                return span.innerText.replace(/[^\d]/g, "");
+                const text = (span.textContent || span.innerText || "").replace(/[^\d]/g, "");
+                if (text) return text;
+            }
+
+            // MÉTHODE 2 : Attribut data-n sur l'élément .js-players-now
+            const el = document.querySelector('.js-players-now');
+            if (el) {
+                const dataN = el.getAttribute('data-n');
+                if (dataN && /\d/.test(dataN)) return dataN;
+            }
+
+            // MÉTHODE 3 : Tout span numérique dans .chart-stats-title (fallback large)
+            const anySpan = document.querySelector('.chart-stats-title span');
+            if (anySpan) {
+                const text = (anySpan.textContent || anySpan.innerText || "").replace(/[^\d]/g, "");
+                if (text) return text;
             }
 
             return null;
         });
+
 
         await browser.close();
         
