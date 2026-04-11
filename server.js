@@ -8,13 +8,12 @@ app.use(cors());
 const PORT = process.env.PORT || 8080;
 const URL = "https://fortnite.gg/island/2327-7349-9384";
 
-// Route de base (Healthcheck pour Railway)
-app.get("/", (req, res) => res.send("🚀 API Fortnite LIVE"));
+app.get("/", (req, res) => res.send("🚀 API Fortnite Online - Fix PR Railway"));
 
 app.get("/api/players", async (req, res) => {
     let browser;
     try {
-        console.log("Lancement de Chromium...");
+        console.log("Lancement de l'extraction précise...");
         browser = await chromium.launch({ 
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
@@ -23,36 +22,45 @@ app.get("/api/players", async (req, res) => {
         const context = await browser.newContext({
             userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         });
-
         const page = await context.newPage();
-        
-        console.log("Chargement de la page...");
-        await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45000 });
 
-        // On attend que les stats dynamiques se chargent
+        await page.goto(URL, { waitUntil: "networkidle", timeout: 45000 });
+
+        // Attente forcée pour que le JS de Fortnite.gg affiche le chiffre
         await page.waitForTimeout(8000);
 
         const playersNow = await page.evaluate(() => {
-            // LISTE NOIRE : On ignore l'année actuelle et ton ID de map
-            const blacklist = ["2025", "2026", "2327", "7349", "9384"];
-            
-            // On cherche le texte "Players Right Now"
-            const elements = Array.from(document.querySelectorAll('div, b, span, p'));
-            const targetLabel = elements.find(el => {
-                const text = el.innerText.toUpperCase();
-                return text.includes("PLAYERS RIGHT NOW") || text.includes("JOUEURS ACTUELS");
+            // Fonction pour vérifier si un nombre est crédible (entre 1 et 1 million, pas une année)
+            const isPlausibleCount = (n) => {
+                const num = parseInt(n.replace(/[^\d]/g, ""), 10);
+                return num > 0 && num < 1000000 && num !== 2025 && num !== 2026;
+            };
+
+            // 1. On cherche précisément l'élément qui contient le texte exact
+            const elements = Array.from(document.querySelectorAll('div, b, span'));
+            const label = elements.find(el => {
+                const t = el.innerText.trim().toUpperCase();
+                return t === "PLAYERS RIGHT NOW" || t === "JOUEURS ACTUELS";
             });
 
-            if (targetLabel) {
-                // On récupère le texte du conteneur parent qui contient le chiffre
-                const containerText = targetLabel.parentElement.innerText;
-                // On extrait tous les nombres
-                const foundNumbers = containerText.match(/\d+/g);
+            if (label) {
+                // STRATÉGIE PR : On cherche dans les éléments frères (siblings) ou le parent direct
+                const parent = label.parentElement;
+                const siblings = Array.from(parent.children);
+                
+                for (let sibling of siblings) {
+                    const text = sibling.innerText.trim();
+                    if (isPlausibleCount(text)) {
+                        return text.replace(/[^\d]/g, "");
+                    }
+                }
 
-                if (foundNumbers) {
-                    // On filtre pour ne garder que le chiffre qui n'est PAS dans la liste noire
-                    const result = foundNumbers.find(n => !blacklist.includes(n));
-                    return result || null;
+                // Fallback : On cherche n'importe quel chiffre crédible dans le bloc parent
+                const parentText = parent.innerText;
+                const matches = parentText.match(/\d[\d\s,.]*/g);
+                if (matches) {
+                    const count = matches.find(m => isPlausibleCount(m));
+                    if (count) return count.replace(/[^\d]/g, "");
                 }
             }
             return null;
@@ -60,7 +68,7 @@ app.get("/api/players", async (req, res) => {
 
         await browser.close();
         
-        console.log(`Extraction réussie : ${playersNow}`);
+        console.log(`[LOG] Chiffre extrait : ${playersNow}`);
 
         res.json({
             ok: playersNow !== null,
@@ -69,11 +77,10 @@ app.get("/api/players", async (req, res) => {
 
     } catch (err) {
         if (browser) await browser.close();
-        console.error("Erreur détectée:", err.message);
         res.status(500).json({ ok: false, error: err.message });
     }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Serveur actif sur le port ${PORT}`);
+    console.log(`🚀 Serveur en ligne sur le port ${PORT}`);
 });
