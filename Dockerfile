@@ -1,21 +1,19 @@
-# On utilise l'image officielle de Microsoft qui contient TOUTES les dépendances
+# Utilisation de l'image Microsoft synchronisée avec Playwright 1.42.1
 FROM mcr.microsoft.com/playwright:v1.42.1-jammy
 
 # Dossier de travail
 WORKDIR /app
 
-# Copie des fichiers de dépendances
+# Installation des dépendances
 COPY package*.json ./
-
-# Installation des dépendances (Playwright est déjà dans l'image, on installe juste express/cors)
 RUN npm install
 
-# Copie du reste du code
+# Copie du code
 COPY . .
 
-# Railway utilise le port 8080 par défaut
+# Configuration du port pour Railway
 ENV PORT=8080
 EXPOSE 8080
 
-# Commande pour démarrer le serveur
+# Lancement du serveur
 CMD ["node", "server.js"]
