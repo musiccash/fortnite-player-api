@@ -10,8 +10,8 @@ const PORT = process.env.PORT || 8080;
 // 1. CONFIGURATION : Ajoute ici tous les IDs de tes maps
 const MAPS_TO_TRACK = [
     "2327-7349-9384", 
-    "AUTRE-ID-ICI",
-    "ENCORE-UN-AUTRE"
+    "7127-0120-4449",
+    "1186-5766-0282"
 ];
 
 // 2. STOCKAGE GLOBAL : C'est ici que les chiffres sont gardés
