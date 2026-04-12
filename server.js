@@ -1,80 +1,67 @@
 import express from "express";
 import cors from "cors";
 import { chromium } from "playwright";
+import axios from "axios"; // On ajoute axios pour appeler ton site
 
 const app = express();
 app.use(cors());
 
 const PORT = process.env.PORT || 8080;
+const BASE44_API_LIST = "https://blacklist-manager.base44.app/api/get-all-fortnite-ids"; // L'URL que l'IA Base44 doit créer
 
-// 1. CONFIGURATION : Ajoute ici tous les IDs de tes maps
-const MAPS_TO_TRACK = [
-    "2327-7349-9384", 
-    "7127-0120-4449",
-    "1186-5766-0282"
-];
-
-// 2. STOCKAGE GLOBAL : C'est ici que les chiffres sont gardés
 let globalStats = {}; 
 
-app.get("/", (req, res) => res.send("🚀 API WORKER ACTIVE"));
+app.get("/", (req, res) => res.send("🚀 WORKER DYNAMIQUE ACTIF"));
 
-// La route est maintenant instantanée !
 app.get("/api/players", (req, res) => {
     const mapId = req.query.id;
     if (globalStats[mapId]) {
         res.json({ ok: true, mapId, playersNow: globalStats[mapId] });
     } else {
-        res.json({ ok: false, error: "Map non suivie ou en cours de chargement" });
+        res.json({ ok: false, error: "Map non encore synchronisée" });
     }
 });
 
-// 3. LE WORKER : La fonction qui tourne en boucle
 async function startWorker() {
-    console.log("🛠️ Démarrage du Worker de scraping...");
-    const browser = await chromium.launch({ 
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'] 
-    });
+    const browser = await chromium.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+    const context = await browser.newContext();
 
-    const context = await browser.newContext({
-        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    });
+    while (true) {
+        try {
+            // --- ÉTAPE CLÉ : Récupérer la liste depuis ta BDD ---
+            console.log("🔄 Récupération de la liste des maps depuis Base44...");
+            const response = await axios.get(BASE44_API_LIST);
+            const mapsToTrack = response.data.ids; // On attend un format { ids: ["ID1", "ID2"] }
 
-    while (true) { // Boucle infinie
-        for (const id of MAPS_TO_TRACK) {
-            let page;
-            try {
-                console.log(`[Worker] Update de la map : ${id}`);
-                page = await context.newPage();
-                await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,css,woff,woff2}', route => route.abort());
-                
-                await page.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "domcontentloaded", timeout: 30000 });
+            for (const id of mapsToTrack) {
+                let page;
+                try {
+                    page = await context.newPage();
+                    await page.route('**/*.{png,jpg,jpeg,css}', route => route.abort());
+                    await page.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "domcontentloaded", timeout: 20000 });
 
-                const count = await page.evaluate(() => {
-                    const el = document.querySelector('.js-players-now .chart-stats-title span');
-                    return el ? el.textContent.replace(/[^\d]/g, "") : null;
-                });
+                    const count = await page.evaluate(() => {
+                        const el = document.querySelector('.js-players-now .chart-stats-title span');
+                        return el ? el.textContent.replace(/[^\d]/g, "") : null;
+                    });
 
-                if (count) {
-                    globalStats[id] = parseInt(count, 10);
-                    console.log(`[Worker] Succès : ${id} -> ${count} joueurs`);
+                    if (count) {
+                        globalStats[id] = parseInt(count, 10);
+                        console.log(`[Worker] ${id}: ${count} joueurs`);
+                    }
+                    await page.close();
+                } catch (err) {
+                    if (page) await page.close();
                 }
-                await page.close();
-            } catch (err) {
-                console.error(`[Worker] Erreur sur ${id}:`, err.message);
-                if (page) await page.close();
+                await new Promise(r => setTimeout(r, 2000));
             }
-            // Petite pause de 2 secondes entre chaque map pour ne pas se faire bannir
-            await new Promise(r => setTimeout(r, 2000));
+        } catch (err) {
+            console.error("❌ Impossible de joindre la BDD de Base44:", err.message);
         }
-        
-        console.log("--- Cycle terminé. Pause de 60s avant le prochain refresh ---");
-        await new Promise(r => setTimeout(r, 60000)); // Attend 1 minute avant de recommencer
+        await new Promise(r => setTimeout(r, 60000));
     }
 }
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Serveur actif sur ${PORT}`);
-    // On lance le worker en arrière-plan sans bloquer le serveur
     startWorker().catch(console.error);
 });
