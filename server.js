@@ -106,8 +106,8 @@ async function startWorker() {
                     
                     // Extraire le chiffre
                     const players = await pageFortnite.evaluate(() => {
-                        const el = document.querySelector('.js-players-now .chart-stats-title span');
-                        return el ? el.textContent.replace(/[^\d]/g, "") : null;
+                        const el = document.querySelector('.js-players-now');
+                        return el ? el.getAttribute('data-n') : null;
                     });
 
                     if (players) {
