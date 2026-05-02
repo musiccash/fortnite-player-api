@@ -105,21 +105,32 @@ async function startWorker() {
                     await pageFortnite.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "domcontentloaded", timeout: 20000 });
                     
                     // Extraire le chiffre
-                    const players = await pageFortnite.evaluate(() => {
+                    const count = await pageFortnite.evaluate(() => {
+                        // Method 1: Extract from span inside .chart-stats-title
+                        const span = document.querySelector('.js-players-now .chart-stats-title span');
+                        if (span) {
+                            const text = (span.textContent || span.innerText || '').replace(/[^\d]/g, '');
+                            if (text) return text;
+                        }
+
+                        // Method 2: Fallback to data-n attribute
                         const el = document.querySelector('.js-players-now');
-                        return el ? el.getAttribute('data-n') : null;
+                        if (el && el.getAttribute('data-n')) {
+                            return el.getAttribute('data-n');
+                        }
+
+                        return null;
                     });
 
-                    if (players) {
-                        globalStats[id] = parseInt(players, 10);
-                        console.log(`   -> [LIVE] Map ${id} : ${players} joueurs`);
+                    console.log(`   -> [DEBUG] Map ${id} : valeur brute extraite = "${count}"`);
+
+                    if (count) {
+                        globalStats[id] = parseInt(count, 10);
+                        console.log(`   -> [LIVE] Map ${id} : ${count} joueurs`);
                     } else {
                         console.log(`   -> [Alerte] Impossible de lire le chiffre pour ${id}`);
                     }
-                } catch (err) {
-                    console.log(`❌ Erreur lors du scraping de la map ${id} : ${err.message}`);
-                } finally {
-                    if (pageFortnite) await pageFortnite.close();
+
                 }
                 
                 // Petite pause entre chaque map pour ne pas alerter Fortnite.gg
