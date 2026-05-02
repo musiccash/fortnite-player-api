@@ -100,34 +100,79 @@ async function startWorker() {
                     // On bloque le superflu pour booster la vitesse
                     await p.route('**/*.{png,jpg,jpeg,css,woff,woff2}', r => r.abort());
                     
-                    await p.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "domcontentloaded", timeout: 20000 });
-                    
-                    // On attend que le conteneur soit là
-                    await p.waitForSelector('.js-players-now', { timeout: 10000 }).catch(() => {});
-                    // Petit délai pour laisser le JS de Fortnite.gg injecter le chiffre
-                    await new Promise(r => setTimeout(r, 2000));
+                    // 1. networkidle ensures all JS-driven XHR/fetch calls have settled
+                    await p.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "networkidle", timeout: 20000 });
 
-                    const players = await p.evaluate(() => {
-                        // Cible A : Le span dans le titre (La plus fiable)
+                    // 2. Wait for the container element to appear in the DOM
+                    try {
+                        await p.waitForSelector('.js-players-now', { timeout: 10000 });
+                        console.log(`[DEBUG] .js-players-now selector found for ${id}`);
+                    } catch (selectorErr) {
+                        console.log(`[DEBUG] .js-players-now selector NOT found for ${id}: ${selectorErr.message}`);
+                    }
+
+                    // 3. Extra pause to let client-side JS populate the player count
+                    await p.waitForTimeout(3000);
+
+                    // 4. Comprehensive DOM debugging before extraction
+                    const debugInfo = await p.evaluate(() => {
+                        const container = document.querySelector('.js-players-now');
                         const span = document.querySelector('.js-players-now .chart-stats-title span');
-                        let val = span ? span.textContent : null;
-
-                        // Cible B : Fallback sur l'attribut data-n
-                        if (!val || val.trim() === "") {
-                            const container = document.querySelector('.js-players-now [data-n]');
-                            val = container ? container.getAttribute('data-n') : null;
-                        }
-
-                        return val;
+                        const dataN = document.querySelector('.js-players-now [data-n]');
+                        return {
+                            containerExists: !!container,
+                            containerHTML: container ? container.outerHTML : null,
+                            spanText: span ? span.textContent : null,
+                            dataNValue: dataN ? dataN.getAttribute('data-n') : null,
+                        };
                     });
+                    console.log(`[DEBUG] containerExists for ${id}: ${debugInfo.containerExists}`);
+                    console.log(`[DEBUG] containerHTML for ${id}: ${debugInfo.containerHTML}`);
+                    console.log(`[DEBUG] spanText for ${id}: "${debugInfo.spanText}"`);
+                    console.log(`[DEBUG] dataNValue for ${id}: "${debugInfo.dataNValue}"`);
 
-                    // [DEBUG] Log pour diagnostic rapide dans Railway
-                    console.log(`[DEBUG] Brute pour ${id}: "${players}"`);
+                    // 5. Try multiple extraction methods with detailed logging
+                    let players = null;
+
+                    // Method A: span inside .chart-stats-title (primary target)
+                    if (debugInfo.spanText && debugInfo.spanText.trim() !== "") {
+                        players = debugInfo.spanText;
+                        console.log(`[DEBUG] Method A (span) succeeded for ${id}: "${players}"`);
+                    } else {
+                        console.log(`[DEBUG] Method A (span) failed for ${id} — value: "${debugInfo.spanText}"`);
+                    }
+
+                    // Method B: data-n attribute fallback
+                    if (!players && debugInfo.dataNValue && debugInfo.dataNValue.trim() !== "") {
+                        players = debugInfo.dataNValue;
+                        console.log(`[DEBUG] Method B (data-n) succeeded for ${id}: "${players}"`);
+                    } else if (!players) {
+                        console.log(`[DEBUG] Method B (data-n) failed for ${id} — value: "${debugInfo.dataNValue}"`);
+                    }
+
+                    // Method C: any numeric text node inside the container
+                    if (!players && debugInfo.containerExists) {
+                        const methodC = await p.evaluate(() => {
+                            const container = document.querySelector('.js-players-now');
+                            if (!container) return null;
+                            const text = container.innerText || container.textContent || "";
+                            const match = text.match(/[\d,]+/);
+                            return match ? match[0] : null;
+                        });
+                        if (methodC) {
+                            players = methodC;
+                            console.log(`[DEBUG] Method C (regex innerText) succeeded for ${id}: "${players}"`);
+                        } else {
+                            console.log(`[DEBUG] Method C (regex innerText) failed for ${id}`);
+                        }
+                    }
+
+                    console.log(`[DEBUG] Final raw value for ${id}: "${players}"`);
 
                     if (players) {
                         // Nettoyage : On ne garde que les chiffres (ex: "1,234" -> 1234)
                         const cleanCount = parseInt(players.replace(/[^\d]/g, ""), 10);
-                        
+
                         if (!isNaN(cleanCount)) {
                             globalStats[id] = cleanCount;
                             console.log(`📈 [LIVE] Map ${id} : ${cleanCount} joueurs`);
@@ -135,6 +180,7 @@ async function startWorker() {
                     } else {
                         console.log(`⚠️ [Alerte] Aucun chiffre trouvé pour ${id}`);
                     }
+
                 } catch (err) {
                     console.log(`❌ Erreur sur ${id}: ${err.message}`);
                 } finally {
