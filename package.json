@@ -1,14 +1,12 @@
 {
-  "name": "fortnite-player-api",
-  "version": "1.0.0",
-  "description": "API de scraping ultra-rapide pour Base44",
-  "main": "server.js",
+  "name": "fortnite-player-api-final",
+  "version": "1.1.0",
   "type": "module",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "axios": "^1.6.8",
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "playwright": "1.59.1"
