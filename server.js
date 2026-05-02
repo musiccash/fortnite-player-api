@@ -92,37 +92,54 @@ async function startWorker() {
             // ==========================================
             // ÉTAPE 2 : SCRAPER LES MAPS SUR FORTNITE.GG
             // ==========================================
-            console.log("🎮 ÉTAPE 2 : Scraping des statistiques...");
+            // 2. SCRAPING DES JOUEURS (FORTNITE.GG)
             for (const id of mapsToTrack) {
-                let pageFortnite;
+                let p;
                 try {
-                    pageFortnite = await context.newPage();
+                    p = await context.newPage();
+                    // On bloque le superflu pour booster la vitesse
+                    await p.route('**/*.{png,jpg,jpeg,css,woff,woff2}', r => r.abort());
                     
-                    // Bloquer les images et CSS pour aller 10x plus vite
-                    await pageFortnite.route('**/*.{png,jpg,jpeg,css,woff,woff2}', route => route.abort());
+                    await p.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "domcontentloaded", timeout: 20000 });
                     
-                    // Aller sur la map
-                    await pageFortnite.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "domcontentloaded", timeout: 20000 });
-                    
-                    // Extraire le chiffre
-                    const players = await pageFortnite.evaluate(() => {
-                        const el = document.querySelector('.js-players-now');
-                        return el ? el.getAttribute('data-n') : null;
+                    // On attend que le conteneur soit là
+                    await p.waitForSelector('.js-players-now', { timeout: 10000 }).catch(() => {});
+                    // Petit délai pour laisser le JS de Fortnite.gg injecter le chiffre
+                    await new Promise(r => setTimeout(r, 2000));
+
+                    const players = await p.evaluate(() => {
+                        // Cible A : Le span dans le titre (La plus fiable)
+                        const span = document.querySelector('.js-players-now .chart-stats-title span');
+                        let val = span ? span.textContent : null;
+
+                        // Cible B : Fallback sur l'attribut data-n
+                        if (!val || val.trim() === "") {
+                            const container = document.querySelector('.js-players-now [data-n]');
+                            val = container ? container.getAttribute('data-n') : null;
+                        }
+
+                        return val;
                     });
 
+                    // [DEBUG] Log pour diagnostic rapide dans Railway
+                    console.log(`[DEBUG] Brute pour ${id}: "${players}"`);
+
                     if (players) {
-                        globalStats[id] = parseInt(players, 10);
-                        console.log(`   -> [LIVE] Map ${id} : ${players} joueurs`);
+                        // Nettoyage : On ne garde que les chiffres (ex: "1,234" -> 1234)
+                        const cleanCount = parseInt(players.replace(/[^\d]/g, ""), 10);
+                        
+                        if (!isNaN(cleanCount)) {
+                            globalStats[id] = cleanCount;
+                            console.log(`📈 [LIVE] Map ${id} : ${cleanCount} joueurs`);
+                        }
                     } else {
-                        console.log(`   -> [Alerte] Impossible de lire le chiffre pour ${id}`);
+                        console.log(`⚠️ [Alerte] Aucun chiffre trouvé pour ${id}`);
                     }
                 } catch (err) {
-                    console.log(`❌ Erreur lors du scraping de la map ${id} : ${err.message}`);
+                    console.log(`❌ Erreur sur ${id}: ${err.message}`);
                 } finally {
-                    if (pageFortnite) await pageFortnite.close();
+                    if (p) await p.close();
                 }
-                
-                // Petite pause entre chaque map pour ne pas alerter Fortnite.gg
                 await new Promise(r => setTimeout(r, 2000));
             }
 
