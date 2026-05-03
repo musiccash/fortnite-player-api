@@ -32,21 +32,89 @@ async function updateMap(id, current_players) {
   });
 }
 
+// Resource types to block — heavy assets that are not needed for Cloudflare
+// validation or player-count extraction. XHR/fetch and scripts are kept so
+// that Cloudflare's JS challenge can run to completion.
+const BLOCKED_RESOURCE_TYPES = new Set([
+  'image',
+  'stylesheet',
+  'font',
+  'media',
+  'texttrack',
+  'eventsource',
+  'websocket',
+  'manifest',
+  'other'
+]);
+
 async function scrapeCount(browser, fortniteId) {
   const page = await browser.newPage();
   try {
-    await page.route('**/*.{png,jpg,jpeg,gif,woff2,woff,ttf}', r => r.abort());
-
-    await page.goto(`https://fortnite.gg/island/${fortniteId}`, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000
+    // ── Aggressive resource blocking ──────────────────────────────────────
+    // Block all heavy/non-essential resource types. We keep 'document',
+    // 'script', 'xhr', and 'fetch' so Cloudflare's challenge JS can execute.
+    await page.route('**/*', (route) => {
+      const type = route.request().resourceType();
+      if (BLOCKED_RESOURCE_TYPES.has(type)) {
+        route.abort();
+      } else {
+        route.continue();
+      }
     });
 
-    // Laisser le JS de la page s'exécuter
-    await page.waitForTimeout(5000);
+    // ── Navigation ────────────────────────────────────────────────────────
+    await page.goto(`https://fortnite.gg/island/${fortniteId}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000
+    });
 
+    // ── Wait for Cloudflare challenge to complete (up to 30 s) ────────────
+    // Cloudflare's "One More Step" / "Just a moment" challenge typically
+    // resolves within 5–15 s. We poll every 2 s and bail out early once the
+    // challenge page is gone, capping at 30 s total.
+    const CF_CHALLENGE_PHRASES = [
+      'one more step',
+      'just a moment',
+      'checking your browser',
+      'please wait',
+      'enable javascript and cookies'
+    ];
+
+    let cfDetected = false;
+    const pollInterval = 2000;
+    const maxWait = 30000;
+    const pollSteps = maxWait / pollInterval;
+
+    for (let i = 0; i < pollSteps; i++) {
+      await page.waitForTimeout(pollInterval);
+
+      const pageText = await page.evaluate(() =>
+        document.body?.innerText?.toLowerCase() ?? ''
+      );
+
+      const isChallenge = CF_CHALLENGE_PHRASES.some(p => pageText.includes(p));
+
+      if (isChallenge) {
+        cfDetected = true;
+        console.log(`[CF] Challenge détecté (${(i + 1) * pollInterval / 1000}s écoulées)…`);
+      } else {
+        // Challenge page is gone — content has loaded
+        if (cfDetected) {
+          console.log(`[CF] Challenge résolu après ~${(i + 1) * pollInterval / 1000}s`);
+        }
+        cfDetected = false;
+        break;
+      }
+    }
+
+    // ── Graceful failure if still blocked ────────────────────────────────
+    if (cfDetected) {
+      console.warn(`[CF] ⚠️ Cloudflare "One More Step" toujours présent après ${maxWait / 1000}s pour ${fortniteId}. Abandon.`);
+      return null;
+    }
+
+    // ── Player-count extraction ───────────────────────────────────────────
     const result = await page.evaluate(() => {
-      // Debug: dump HTML + texte visible
       const html = document.body.innerHTML.slice(0, 3000);
       const text = document.body.innerText.slice(0, 1000);
 
@@ -113,7 +181,22 @@ async function scrapeCount(browser, fortniteId) {
 async function startWorker() {
   console.log("🛠️ Démarrage Playwright...");
   const browser = await chromium.launch({
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      // Additional anti-detection / hardening flags
+      '--disable-extensions',
+      '--disable-plugins',
+      '--disable-web-resources',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--metrics-recording-only',
+      '--no-first-run',
+      '--safebrowsing-disable-auto-update',
+      '--disable-blink-features=AutomationControlled'
+    ]
   });
 
   while (true) {
