@@ -21,7 +21,6 @@ app.get("/health", (req, res) => res.status(200).send("OK"));
 async function getMaps() {
   const res = await fetch(`${API}/RPMap?limit=100`, { headers });
   const all = await res.json();
-  // Filtre local : maps online avec un fortnite_id
   return Array.isArray(all) ? all.filter(m => m.status === 'online' && m.fortnite_id) : [];
 }
 
@@ -33,13 +32,35 @@ async function updateMap(id, current_players) {
   });
 }
 
+async function scrapeCount(browser, fortniteId) {
+  const page = await browser.newPage();
+  try {
+    // Bloquer UNIQUEMENT les images, pas les CSS
+    await page.route('**/*.{png,jpg,jpeg,gif,woff2,woff,ttf}', r => r.abort());
+    
+    await page.goto(`https://fortnite.gg/island/${fortniteId}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000
+    });
+
+    // Attendre que l'élément soit présent dans le DOM
+    await page.waitForSelector('.js-players-now', { timeout: 10000 });
+
+    const count = await page.evaluate(() => {
+      const el = document.querySelector('.js-players-now');
+      return el ? el.getAttribute('data-n') : null;
+    });
+
+    return count !== null ? parseInt(count, 10) : null;
+  } finally {
+    await page.close();
+  }
+}
+
 async function startWorker() {
   console.log("🛠️ Démarrage Playwright...");
   const browser = await chromium.launch({
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-  });
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
   });
 
   while (true) {
@@ -47,37 +68,23 @@ async function startWorker() {
       console.log("\n--- NOUVEAU CYCLE ---");
       const maps = await getMaps();
 
-      if (!maps || !maps.length) {
+      if (!maps.length) {
         console.log("💤 Aucune map active.");
       } else {
         console.log(`📍 ${maps.length} maps détectées.`);
-
         for (const map of maps) {
-          const id = map.fortnite_id;
-          const p = await context.newPage();
-          await p.route('**/*.{png,jpg,jpeg,svg,woff2,css,gif}', r => r.abort());
-
           try {
-            console.log(`🔍 Scraping : ${id}`);
-            await p.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "domcontentloaded", timeout: 30000 });
-
-            const count = await p.evaluate(() => {
-              const el = document.querySelector('.js-players-now');
-              return el ? el.getAttribute('data-n') : null;
-            });
-
+            console.log(`🔍 Scraping : ${map.fortnite_id}`);
+            const count = await scrapeCount(browser, map.fortnite_id);
             if (count !== null) {
-              const cleanCount = parseInt(count, 10);
-              console.log(`📈 [${id}] : ${cleanCount} joueurs`);
-              await updateMap(map.id, cleanCount);
-              console.log(`✅ Base44 mis à jour pour ${id}`);
+              console.log(`📈 [${map.fortnite_id}] : ${count} joueurs`);
+              await updateMap(map.id, count);
+              console.log(`✅ Base44 mis à jour`);
             } else {
-              console.log(`⚠️ Impossible de lire le chiffre pour ${id}`);
+              console.log(`⚠️ data-n introuvable pour ${map.fortnite_id}`);
             }
           } catch (err) {
-            console.error(`❌ Erreur sur ${id}:`, err.message);
-          } finally {
-            await p.close();
+            console.error(`❌ Erreur sur ${map.fortnite_id}:`, err.message);
           }
           await new Promise(r => setTimeout(r, 2000));
         }
