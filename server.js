@@ -32,78 +32,81 @@ async function updateMap(id, current_players) {
   });
 }
 
+const BLOCKED_TYPES = new Set([
+  'image', 'stylesheet', 'font', 'media',
+  'texttrack', 'eventsource', 'websocket', 'manifest', 'other'
+]);
+
+const CF_PHRASES = [
+  'security check',
+  'one more step',
+  'checking your browser',
+  'please wait',
+  'cloudflare',
+  'just a moment'
+];
+
 async function scrapeCount(browser, fortniteId) {
   const page = await browser.newPage();
   try {
-    await page.route('**/*.{png,jpg,jpeg,gif,woff2,woff,ttf}', r => r.abort());
+    // Bloquer ressources non essentielles mais garder document/script/xhr/fetch
+    await page.route('**/*', (route) => {
+      if (BLOCKED_TYPES.has(route.request().resourceType())) {
+        route.abort();
+      } else {
+        route.continue();
+      }
+    });
 
     await page.goto(`https://fortnite.gg/island/${fortniteId}`, {
       waitUntil: "domcontentloaded",
       timeout: 30000
     });
 
-    // Laisser le JS de la page s'exécuter
-    await page.waitForTimeout(5000);
+    // Polling 30s : attendre que le challenge CF soit résolu
+    const MAX_WAIT = 30000;
+    const INTERVAL = 2000;
+    let elapsed = 0;
+    let challengeCleared = false;
 
-    const result = await page.evaluate(() => {
-      // Debug: dump HTML + texte visible
-      const html = document.body.innerHTML.slice(0, 3000);
-      const text = document.body.innerText.slice(0, 1000);
-
-      let count = null;
-      let strategy = null;
-
-      // Stratégie 1 : .js-players-now .chart-stats-title span
-      const s1 = document.querySelector('.js-players-now .chart-stats-title span');
-      if (s1 && s1.innerText.trim()) {
-        count = parseInt(s1.innerText.replace(/[^0-9]/g, ''), 10);
-        strategy = 'S1: .js-players-now .chart-stats-title span';
+    while (elapsed < MAX_WAIT) {
+      const bodyText = await page.evaluate(() => document.body.innerText.toLowerCase());
+      const isChallenge = CF_PHRASES.some(p => bodyText.includes(p));
+      if (!isChallenge) {
+        challengeCleared = true;
+        console.log(`✅ Challenge CF résolu après ${elapsed}ms`);
+        break;
       }
+      await page.waitForTimeout(INTERVAL);
+      elapsed += INTERVAL;
+    }
 
-      // Stratégie 2 : .chart-stats-title span (premier)
-      if (count === null) {
-        const s2 = document.querySelector('.chart-stats-title span');
-        if (s2 && s2.innerText.trim()) {
-          count = parseInt(s2.innerText.replace(/[^0-9]/g, ''), 10);
-          strategy = 'S2: .chart-stats-title span';
-        }
-      }
+    if (!challengeCleared) {
+      console.warn(`⚠️ Challenge CF non résolu après ${MAX_WAIT}ms pour ${fortniteId}`);
+      return null;
+    }
 
-      // Stratégie 3 : [class*="players"] avec data-n
-      if (count === null) {
-        const s3 = document.querySelector('[class*="players"][data-n]');
-        if (s3) {
-          count = parseInt(s3.getAttribute('data-n'), 10);
-          strategy = 'S3: [class*=players][data-n]';
-        }
-      }
+    const count = await page.evaluate(() => {
+      // S1 : data-n direct sur .js-players-now
+      const s1 = document.querySelector('.js-players-now');
+      if (s1?.getAttribute('data-n')) return parseInt(s1.getAttribute('data-n'), 10);
 
-      // Stratégie 4 : .js-players-now data-n direct
-      if (count === null) {
-        const s4 = document.querySelector('.js-players-now');
-        if (s4 && s4.getAttribute('data-n')) {
-          count = parseInt(s4.getAttribute('data-n'), 10);
-          strategy = 'S4: .js-players-now[data-n]';
-        }
-      }
+      // S2 : span dans .js-players-now
+      const s2 = document.querySelector('.js-players-now .chart-stats-title span');
+      if (s2?.innerText) return parseInt(s2.innerText.replace(/[^0-9]/g, ''), 10);
 
-      // Stratégie 5 : regex sur le texte visible
-      if (count === null) {
-        const match = document.body.innerText.match(/(\d[\d,]*)\s*Players? right now/i);
-        if (match) {
-          count = parseInt(match[1].replace(/,/g, ''), 10);
-          strategy = 'S5: regex innerText';
-        }
-      }
+      // S3 : premier .chart-stats-title span
+      const s3 = document.querySelector('.chart-stats-title span');
+      if (s3?.innerText) return parseInt(s3.innerText.replace(/[^0-9]/g, ''), 10);
 
-      return { count, strategy, html, text };
+      // S4 : regex sur texte visible
+      const match = document.body.innerText.match(/(\d[\d,]*)\s*Players? right now/i);
+      if (match) return parseInt(match[1].replace(/,/g, ''), 10);
+
+      return null;
     });
 
-    console.log(`[DEBUG] Stratégie utilisée: ${result.strategy ?? 'AUCUNE'}`);
-    console.log(`[DEBUG] HTML (3000 chars):\n${result.html}`);
-    console.log(`[DEBUG] TEXT (1000 chars):\n${result.text}`);
-
-    return isNaN(result.count) ? null : result.count;
+    return (count === null || isNaN(count)) ? null : count;
 
   } finally {
     await page.close();
@@ -113,7 +116,17 @@ async function scrapeCount(browser, fortniteId) {
 async function startWorker() {
   console.log("🛠️ Démarrage Playwright...");
   const browser = await chromium.launch({
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-extensions',
+      '--disable-plugins',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--no-first-run',
+    ]
   });
 
   while (true) {
@@ -134,7 +147,7 @@ async function startWorker() {
               await updateMap(map.id, count);
               console.log(`✅ Base44 mis à jour`);
             } else {
-              console.log(`⚠️ Aucune stratégie n'a trouvé le chiffre pour ${map.fortnite_id}`);
+              console.log(`⚠️ Impossible de lire le chiffre pour ${map.fortnite_id}`);
             }
           } catch (err) {
             console.error(`❌ Erreur sur ${map.fortnite_id}:`, err.message);
