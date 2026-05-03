@@ -19,8 +19,10 @@ app.get("/", (req, res) => res.send("🚀 SCRAPER BASE44 - READY"));
 app.get("/health", (req, res) => res.status(200).send("OK"));
 
 async function getMaps() {
-  const res = await fetch(`${API}/RPMap?filters=${encodeURIComponent(JSON.stringify({ status: "online" }))}`, { headers });
-  return await res.json();
+  const res = await fetch(`${API}/RPMap?limit=100`, { headers });
+  const all = await res.json();
+  // Filtre local : maps online avec un fortnite_id
+  return Array.isArray(all) ? all.filter(m => m.status === 'online' && m.fortnite_id) : [];
 }
 
 async function updateMap(id, current_players) {
@@ -51,7 +53,6 @@ async function startWorker() {
         console.log(`📍 ${maps.length} maps détectées.`);
 
         for (const map of maps) {
-          if (!map.fortnite_id) continue;
           const id = map.fortnite_id;
           const p = await context.newPage();
           await p.route('**/*.{png,jpg,jpeg,svg,woff2,css,gif}', r => r.abort());
