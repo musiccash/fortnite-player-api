@@ -35,27 +35,81 @@ async function updateMap(id, current_players) {
 async function scrapeCount(browser, fortniteId) {
   const page = await browser.newPage();
   try {
-    // Bloquer UNIQUEMENT les images, pas les CSS
+    // Block images/fonts only, keep CSS and JS so the page renders fully
     await page.route('**/*.{png,jpg,jpeg,gif,woff2,woff,ttf}', r => r.abort());
-    
+
     await page.goto(`https://fortnite.gg/island/${fortniteId}`, {
       waitUntil: "domcontentloaded",
       timeout: 30000
     });
 
-    // Attendre que l'élément soit présent dans le DOM
-    await page.waitForSelector('.js-players-now', { timeout: 10000 });
+    // Give JS time to render dynamic content instead of waiting for a
+    // specific selector that may not exist or may have been renamed
+    await page.waitForTimeout(5000);
 
+    // --- Diagnostic: log the raw HTML so we can see the real structure ---
+    const html = await page.content();
+    console.log(`📄 [${fortniteId}] HTML snapshot (first 3000 chars):\n${html.slice(0, 3000)}`);
+
+    // Try multiple selectors in order of specificity
     const count = await page.evaluate(() => {
-      const el = document.querySelector('.js-players-now');
-      return el ? el.getAttribute('data-n') : null;
+      // 1. Original target with a child span
+      const el1 = document.querySelector('.js-players-now .chart-stats-title span');
+      if (el1 && el1.textContent.trim()) {
+        console.log('[selector-1] .js-players-now .chart-stats-title span =>', el1.textContent.trim());
+        return el1.textContent.trim();
+      }
+
+      // 2. Broader: any .chart-stats-title span on the page
+      const el2 = document.querySelector('.chart-stats-title span');
+      if (el2 && el2.textContent.trim()) {
+        console.log('[selector-2] .chart-stats-title span =>', el2.textContent.trim());
+        return el2.textContent.trim();
+      }
+
+      // 3. Any element whose class contains "players"
+      const el3 = document.querySelector('[class*="players"]');
+      if (el3 && el3.textContent.trim()) {
+        console.log('[selector-3] [class*="players"] =>', el3.textContent.trim(), '| classes:', el3.className);
+        return el3.textContent.trim();
+      }
+
+      // 4. data-n attribute on .js-players-now (original approach)
+      const el4 = document.querySelector('.js-players-now');
+      if (el4) {
+        const val = el4.getAttribute('data-n');
+        console.log('[selector-4] .js-players-now[data-n] =>', val);
+        return val;
+      }
+
+      return null;
     });
 
-    return count !== null ? parseInt(count, 10) : null;
+    // 5. Regex fallback: scan visible page text for a standalone number
+    //    near the word "players" (case-insensitive)
+    if (count === null) {
+      const bodyText = await page.evaluate(() => document.body.innerText);
+      console.log(`📝 [${fortniteId}] body text (first 1000 chars):\n${bodyText.slice(0, 1000)}`);
+
+      const match = bodyText.match(/(\d[\d,]*)\s*(?:players?|joueurs?)/i)
+        || bodyText.match(/(?:players?|joueurs?)[^\d]*(\d[\d,]*)/i);
+      if (match) {
+        const raw = match[1].replace(/,/g, '');
+        console.log(`🔢 [${fortniteId}] Regex match: "${match[0]}" → ${raw}`);
+        return parseInt(raw, 10);
+      }
+
+      console.log(`⚠️ [${fortniteId}] No player count found with any strategy.`);
+      return null;
+    }
+
+    const parsed = parseInt(String(count).replace(/,/g, ''), 10);
+    return isNaN(parsed) ? null : parsed;
   } finally {
     await page.close();
   }
 }
+
 
 async function startWorker() {
   console.log("🛠️ Démarrage Playwright...");
