@@ -1,12 +1,14 @@
 {
   "name": "fortnite-base44-worker",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "type": "module",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "dependencies": {
     "express": "^4.19.2",
     "cors": "^2.8.5",
-    "playwright": "1.43.1"
+    "playwright": "1.43.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
