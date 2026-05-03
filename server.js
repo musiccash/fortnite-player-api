@@ -1,54 +1,29 @@
 import express from "express";
 import cors from "cors";
 import { chromium } from "playwright";
+import { createClient } from '@base44/sdk';
 
 const app = express();
 app.use(cors());
 
-// --- CONFIGURATION ---
+// Configuration
 const PORT = process.env.PORT || 8080;
-const BASE44_URL = "https://blacklist-manager.base44.app/fortnite-ids";
-const BASE44_API_UPDATE = "https://blacklist-manager.base44.app/api/update-players";
-const API_KEY = process.env.BASE44_API_KEY || "TON_CODE_SECRET_ICI";
-
-// Stockage local pour consultation rapide via /api/players
-let globalStats = {};
-
-// --- ROUTES EXPRESS ---
-app.get("/", (req, res) => res.send("🚀 WORKER SCRAPER V5 EN LIGNE"));
-
-app.get("/api/players", (req, res) => {
-    const { id } = req.query;
-    if (id && globalStats[id] !== undefined) {
-        return res.json({ ok: true, mapId: id, playersNow: globalStats[id] });
-    }
-    res.json({ ok: false, data: globalStats });
+const base44 = createClient({
+  appId: process.env.BASE44_APP_ID,
+  headers: {
+    "api_key": process.env.BASE44_API_KEY
+  }
 });
 
-// --- FONCTION DE MISE À JOUR VERS BASE44 ---
-async function updateBase44(mapId, count) {
-    try {
-        const response = await fetch(BASE44_API_UPDATE, {
-            method: 'POST', // Ou PUT selon ton API
-            headers: {
-                'Content-Type': 'application/json',
-                'X-API-KEY': API_KEY // Sécurité
-            },
-            body: JSON.stringify({
-                fortnite_id: mapId,
-                current_players: parseInt(count)
-            })
-        });
-        console.log(`📡 Base44 Update [${mapId}]: ${response.statusText}`);
-    } catch (err) {
-        console.error(`⚠️ Erreur envoi Base44 [${mapId}]:`, err.message);
-    }
-}
+let globalStats = {};
 
-// --- LE WORKER (BOUCLE INFINIE) ---
+app.get("/", (req, res) => res.send("🚀 SCRAPER BASE44 DOCKERIZED - READY"));
+app.get("/health", (req, res) => res.status(200).send("OK"));
+
 async function startWorker() {
-    console.log("🛠️ Initialisation du navigateur...");
+    console.log("🛠️ Démarrage du navigateur Playwright...");
     
+    // On lance le navigateur une seule fois pour tout le cycle
     const browser = await chromium.launch({
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     });
@@ -59,68 +34,75 @@ async function startWorker() {
 
     while (true) {
         try {
-            console.log("\n--- NOUVEAU CYCLE ---");
+            console.log("\n--- NOUVEAU CYCLE DE SCAN ---");
 
-            // 1. RÉCUPÉRATION DES IDS DEPUIS BASE44
-            const pageBase = await context.newPage();
-            let mapsToTrack = [];
-            try {
-                await pageBase.goto(BASE44_URL, { waitUntil: "networkidle", timeout: 20000 });
-                const bodyText = await pageBase.innerText('body');
-                const jsonMatch = bodyText.match(/\{[\s\S]*"ids"[\s\S]*\}/);
-                mapsToTrack = jsonMatch ? JSON.parse(jsonMatch[0]).ids : [];
-            } catch (e) {
-                console.error("❌ Impossible de lire /fortnite-ids");
-            } finally { await pageBase.close(); }
+            // 1. Récupération des maps (Table 'maps')
+            const { data: maps, error: fetchError } = await base44
+                .from('maps') 
+                .select('fortnite_id')
+                .eq('status', 'online');
 
-            console.log(`📍 Maps à scanner : ${mapsToTrack.length}`);
+            if (fetchError) {
+                console.error("❌ Erreur Base44 (Fetch):", fetchError.message);
+            } else if (maps && maps.length > 0) {
+                console.log(`📍 ${maps.length} maps détectées.`);
 
-            // 2. SCRAPING INDIVIDUEL
-            for (const id of mapsToTrack) {
-                const p = await context.newPage();
-                // Optimisation : On bloque les images et le CSS lourd
-                await p.route('**/*.{png,jpg,jpeg,svg,woff2,css}', r => r.abort());
+                for (const map of maps) {
+                    const id = map.fortnite_id;
+                    if (!id) continue;
 
-                try {
-                    await p.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "domcontentloaded", timeout: 30000 });
-                    
-                    // Attente que le JS de Fortnite.gg injecte le nombre
-                    await p.waitForTimeout(5000);
+                    const p = await context.newPage();
+                    // Bloquer les ressources inutiles
+                    await p.route('**/*.{png,jpg,jpeg,svg,woff2,css}', r => r.abort());
 
-                    const playerCount = await p.evaluate(() => {
-                        const el = document.querySelector('.js-players-now [data-n]') || 
-                                   document.querySelector('.js-players-now .chart-stats-title span');
-                        return el ? el.innerText.replace(/[^\d]/g, "") : null;
-                    });
-
-                    if (playerCount) {
-                        const cleanCount = parseInt(playerCount);
-                        globalStats[id] = cleanCount;
-                        console.log(`📈 [${id}] : ${cleanCount} joueurs`);
+                    try {
+                        console.log(`🔍 Analyse de la map : ${id}`);
+                        await p.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "domcontentloaded", timeout: 30000 });
                         
-                        // 3. ENVOI À BASE44
-                        await updateBase44(id, cleanCount);
-                    }
-                } catch (err) {
-                    console.error(`❌ Erreur sur ${id}:`, err.message);
-                } finally {
-                    await p.close();
-                }
-                // Pause de 2s entre chaque map pour éviter le ban
-                await new Promise(r => setTimeout(r, 2000));
-            }
+                        // Attente du rendu des compteurs JS
+                        await p.waitForTimeout(5000); 
 
+                        const count = await p.evaluate(() => {
+                            const el = document.querySelector('.js-players-now [data-n]') || 
+                                       document.querySelector('.js-players-now .chart-stats-title span');
+                            return el ? (el.getAttribute('data-n') || el.innerText).replace(/[^\d]/g, "") : null;
+                        });
+
+                        if (count) {
+                            const cleanCount = parseInt(count);
+                            globalStats[id] = cleanCount;
+                            console.log(`📈 [${id}] : ${cleanCount} joueurs`);
+
+                            // 2. Mise à jour de la base de données
+                            const { error: updateError } = await base44
+                                .from('maps')
+                                .update({ current_players: cleanCount })
+                                .eq('fortnite_id', id);
+                            
+                            if (updateError) console.error(`⚠️ Update Failed [${id}]:`, updateError.message);
+                            else console.log(`📡 Base44 synchronisé pour ${id}`);
+                        }
+                    } catch (err) {
+                        console.error(`❌ Erreur technique sur ${id}:`, err.message);
+                    } finally {
+                        await p.close();
+                    }
+                    // Petite pause pour éviter la détection
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+            } else {
+                console.log("💤 Aucune map active à scanner.");
+            }
         } catch (globalErr) {
-            console.error("🚨 Erreur critique cycle:", globalErr.message);
+            console.error("🚨 Erreur critique dans le worker:", globalErr.message);
         }
 
-        console.log("💤 Cycle terminé. Repos 60s...");
+        console.log("💤 Cycle fini. Attente de 60 secondes...");
         await new Promise(r => setTimeout(r, 60000));
     }
 }
 
-// Lancement
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Serveur prêt sur port ${PORT}`);
-    startWorker();
+    console.log(`✅ Serveur HTTP prêt sur le port ${PORT}`);
+    startWorker().catch(err => console.error("🚨 Le Worker n'a pas pu démarrer:", err));
 });
