@@ -8,157 +8,119 @@ app.use(cors());
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 8080;
 const BASE44_URL = "https://blacklist-manager.base44.app/fortnite-ids";
-const FALLBACK_MAPS = ["2327-7349-9384"]; // La map de secours
+const BASE44_API_UPDATE = "https://blacklist-manager.base44.app/api/update-players";
+const API_KEY = process.env.BASE44_API_KEY || "TON_CODE_SECRET_ICI";
 
-// Mémoire qui stocke les joueurs
+// Stockage local pour consultation rapide via /api/players
 let globalStats = {};
 
-// --- ROUTE 1 : HEALTHCHECK RAILWAY ---
-app.get("/", (req, res) => {
-    res.status(200).send("✅ SERVEUR V4 EN LIGNE - WORKER ACTIF");
-});
+// --- ROUTES EXPRESS ---
+app.get("/", (req, res) => res.send("🚀 WORKER SCRAPER V5 EN LIGNE"));
 
-// --- ROUTE 2 : API POUR BASE44 ---
 app.get("/api/players", (req, res) => {
-    const mapId = req.query.id;
-    if (globalStats[mapId]) {
-        res.json({ ok: true, mapId: mapId, playersNow: globalStats[mapId] });
-    } else {
-        res.json({ ok: false, error: "Synchro en cours ou map introuvable." });
+    const { id } = req.query;
+    if (id && globalStats[id] !== undefined) {
+        return res.json({ ok: true, mapId: id, playersNow: globalStats[id] });
     }
+    res.json({ ok: false, data: globalStats });
 });
 
-// --- LE WORKER (ROBOT SCRAPER) ---
-async function startWorker() {
-    let browser;
+// --- FONCTION DE MISE À JOUR VERS BASE44 ---
+async function updateBase44(mapId, count) {
     try {
-        console.log("🛠️ Démarrage du navigateur Playwright...");
-        // Lancement du navigateur optimisé pour serveur
-        browser = await chromium.launch({ 
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+        const response = await fetch(BASE44_API_UPDATE, {
+            method: 'POST', // Ou PUT selon ton API
+            headers: {
+                'Content-Type': 'application/json',
+                'X-API-KEY': API_KEY // Sécurité
+            },
+            body: JSON.stringify({
+                fortnite_id: mapId,
+                current_players: parseInt(count)
+            })
         });
-        const context = await browser.newContext();
-
-        // Boucle infinie du robot
-        while (true) {
-            let mapsToTrack = [];
-            let pageBase44;
-            
-            // ==========================================
-            // ÉTAPE 1 : LIRE LA LISTE SUR BASE44
-            // ==========================================
-            try {
-                console.log("🔍 ÉTAPE 1 : Lecture de la liste sur Base44...");
-                pageBase44 = await context.newPage();
-                
-                // On va sur la page et on attend que le réseau se calme (React a fini de charger)
-                await pageBase44.goto(BASE44_URL, { waitUntil: "networkidle", timeout: 45000 });
-                
-                let content = "";
-                
-                try {
-                    // Tentative A : On cherche la balise <pre id="json-output"> dont Base44 a parlé
-                    console.log("   -> Recherche de la balise <pre>...");
-                    const preLocator = pageBase44.locator('pre#json-output, pre');
-                    await preLocator.first().waitFor({ timeout: 5000 });
-                    content = await preLocator.first().textContent();
-                } catch (err) {
-                    // Tentative B : Si la balise n'y est pas, on aspire tout le texte de la page
-                    console.log("   -> Balise <pre> introuvable, scan global de la page...");
-                    content = await pageBase44.innerText('body');
-                }
-
-                console.log(`   -> Extrait du texte lu : "${content.substring(0, 50)}..."`);
-
-                // On extrait le JSON avec une Regex
-                const match = content.match(/\{[\s\S]*"ids"[\s\S]*\}/);
-                
-                if (match) {
-                    const data = JSON.parse(match[0]);
-                    mapsToTrack = data.ids;
-                    console.log(`✅ SUCCÈS : IDs détectés : ${mapsToTrack.join(', ')}`);
-                } else {
-                    throw new Error("Aucun format JSON valide trouvé dans le texte");
-                }
-            } catch (e) {
-                console.log(`⚠️ ÉCHEC BASE44 : ${e.message}`);
-                console.log(`   -> Utilisation de la liste de secours : ${FALLBACK_MAPS[0]}`);
-                mapsToTrack = FALLBACK_MAPS;
-            } finally {
-                // On ferme toujours l'onglet pour ne pas faire exploser la RAM
-                if (pageBase44) await pageBase44.close();
-            }
-
-            // ==========================================
-            // ÉTAPE 2 : SCRAPER LES MAPS SUR FORTNITE.GG
-            // ==========================================
-            // 2. SCRAPING DES JOUEURS (FORTNITE.GG)
-            for (const id of mapsToTrack) {
-                let p;
-                try {
-                    p = await context.newPage();
-                    // On bloque le superflu pour booster la vitesse
-                    await p.route('**/*.{png,jpg,jpeg,css,woff,woff2}', r => r.abort());
-                    
-                    await p.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "domcontentloaded", timeout: 20000 });
-                    
-                    // On attend que le conteneur soit là
-                    await p.waitForSelector('.js-players-now', { timeout: 10000 }).catch(() => {});
-                    // Petit délai pour laisser le JS de Fortnite.gg injecter le chiffre
-                    await new Promise(r => setTimeout(r, 2000));
-
-                    const players = await p.evaluate(() => {
-                        // Cible A : Le span dans le titre (La plus fiable)
-                        const span = document.querySelector('.js-players-now .chart-stats-title span');
-                        let val = span ? span.textContent : null;
-
-                        // Cible B : Fallback sur l'attribut data-n
-                        if (!val || val.trim() === "") {
-                            const container = document.querySelector('.js-players-now [data-n]');
-                            val = container ? container.getAttribute('data-n') : null;
-                        }
-
-                        return val;
-                    });
-
-                    // [DEBUG] Log pour diagnostic rapide dans Railway
-                    console.log(`[DEBUG] Brute pour ${id}: "${players}"`);
-
-                    if (players) {
-                        // Nettoyage : On ne garde que les chiffres (ex: "1,234" -> 1234)
-                        const cleanCount = parseInt(players.replace(/[^\d]/g, ""), 10);
-                        
-                        if (!isNaN(cleanCount)) {
-                            globalStats[id] = cleanCount;
-                            console.log(`📈 [LIVE] Map ${id} : ${cleanCount} joueurs`);
-                        }
-                    } else {
-                        console.log(`⚠️ [Alerte] Aucun chiffre trouvé pour ${id}`);
-                    }
-                } catch (err) {
-                    console.log(`❌ Erreur sur ${id}: ${err.message}`);
-                } finally {
-                    if (p) await p.close();
-                }
-                await new Promise(r => setTimeout(r, 2000));
-            }
-
-            // ==========================================
-            // ÉTAPE 3 : PAUSE AVANT LE PROCHAIN CYCLE
-            // ==========================================
-            console.log("💤 Cycle terminé. Le robot se repose pendant 60 secondes...");
-            await new Promise(r => setTimeout(r, 60000));
-        }
-    } catch (fatalError) {
-        console.error("🚨 CRASH CRITIQUE DU ROBOT :", fatalError);
-        process.exit(1); // Force Railway à redémarrer
+        console.log(`📡 Base44 Update [${mapId}]: ${response.statusText}`);
+    } catch (err) {
+        console.error(`⚠️ Erreur envoi Base44 [${mapId}]:`, err.message);
     }
 }
 
-// --- DÉMARRAGE OFFICIEL ---
+// --- LE WORKER (BOUCLE INFINIE) ---
+async function startWorker() {
+    console.log("🛠️ Initialisation du navigateur...");
+    
+    const browser = await chromium.launch({
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    });
+
+    const context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    });
+
+    while (true) {
+        try {
+            console.log("\n--- NOUVEAU CYCLE ---");
+
+            // 1. RÉCUPÉRATION DES IDS DEPUIS BASE44
+            const pageBase = await context.newPage();
+            let mapsToTrack = [];
+            try {
+                await pageBase.goto(BASE44_URL, { waitUntil: "networkidle", timeout: 20000 });
+                const bodyText = await pageBase.innerText('body');
+                const jsonMatch = bodyText.match(/\{[\s\S]*"ids"[\s\S]*\}/);
+                mapsToTrack = jsonMatch ? JSON.parse(jsonMatch[0]).ids : [];
+            } catch (e) {
+                console.error("❌ Impossible de lire /fortnite-ids");
+            } finally { await pageBase.close(); }
+
+            console.log(`📍 Maps à scanner : ${mapsToTrack.length}`);
+
+            // 2. SCRAPING INDIVIDUEL
+            for (const id of mapsToTrack) {
+                const p = await context.newPage();
+                // Optimisation : On bloque les images et le CSS lourd
+                await p.route('**/*.{png,jpg,jpeg,svg,woff2,css}', r => r.abort());
+
+                try {
+                    await p.goto(`https://fortnite.gg/island/${id}`, { waitUntil: "domcontentloaded", timeout: 30000 });
+                    
+                    // Attente que le JS de Fortnite.gg injecte le nombre
+                    await p.waitForTimeout(5000);
+
+                    const playerCount = await p.evaluate(() => {
+                        const el = document.querySelector('.js-players-now [data-n]') || 
+                                   document.querySelector('.js-players-now .chart-stats-title span');
+                        return el ? el.innerText.replace(/[^\d]/g, "") : null;
+                    });
+
+                    if (playerCount) {
+                        const cleanCount = parseInt(playerCount);
+                        globalStats[id] = cleanCount;
+                        console.log(`📈 [${id}] : ${cleanCount} joueurs`);
+                        
+                        // 3. ENVOI À BASE44
+                        await updateBase44(id, cleanCount);
+                    }
+                } catch (err) {
+                    console.error(`❌ Erreur sur ${id}:`, err.message);
+                } finally {
+                    await p.close();
+                }
+                // Pause de 2s entre chaque map pour éviter le ban
+                await new Promise(r => setTimeout(r, 2000));
+            }
+
+        } catch (globalErr) {
+            console.error("🚨 Erreur critique cycle:", globalErr.message);
+        }
+
+        console.log("💤 Cycle terminé. Repos 60s...");
+        await new Promise(r => setTimeout(r, 60000));
+    }
+}
+
+// Lancement
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`=========================================`);
-    console.log(`✅ Serveur prêt sur le port ${PORT}`);
-    console.log(`=========================================`);
+    console.log(`✅ Serveur prêt sur port ${PORT}`);
     startWorker();
 });
