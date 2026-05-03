@@ -1,15 +1,12 @@
 {
   "name": "fortnite-base44-worker",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "type": "module",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
     "express": "^4.19.2",
     "cors": "^2.8.5",
-    "playwright": "1.43.1",
-    "@base44/sdk": "latest"
+    "playwright": "1.43.1"
   }
 }
