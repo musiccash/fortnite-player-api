@@ -35,23 +35,76 @@ async function updateMap(id, current_players) {
 async function scrapeCount(browser, fortniteId) {
   const page = await browser.newPage();
   try {
-    // Bloquer UNIQUEMENT les images, pas les CSS
     await page.route('**/*.{png,jpg,jpeg,gif,woff2,woff,ttf}', r => r.abort());
-    
+
     await page.goto(`https://fortnite.gg/island/${fortniteId}`, {
       waitUntil: "domcontentloaded",
       timeout: 30000
     });
 
-    // Attendre que l'élément soit présent dans le DOM
-    await page.waitForSelector('.js-players-now', { timeout: 10000 });
+    // Laisser le JS de la page s'exécuter
+    await page.waitForTimeout(5000);
 
-    const count = await page.evaluate(() => {
-      const el = document.querySelector('.js-players-now');
-      return el ? el.getAttribute('data-n') : null;
+    const result = await page.evaluate(() => {
+      // Debug: dump HTML + texte visible
+      const html = document.body.innerHTML.slice(0, 3000);
+      const text = document.body.innerText.slice(0, 1000);
+
+      let count = null;
+      let strategy = null;
+
+      // Stratégie 1 : .js-players-now .chart-stats-title span
+      const s1 = document.querySelector('.js-players-now .chart-stats-title span');
+      if (s1 && s1.innerText.trim()) {
+        count = parseInt(s1.innerText.replace(/[^0-9]/g, ''), 10);
+        strategy = 'S1: .js-players-now .chart-stats-title span';
+      }
+
+      // Stratégie 2 : .chart-stats-title span (premier)
+      if (count === null) {
+        const s2 = document.querySelector('.chart-stats-title span');
+        if (s2 && s2.innerText.trim()) {
+          count = parseInt(s2.innerText.replace(/[^0-9]/g, ''), 10);
+          strategy = 'S2: .chart-stats-title span';
+        }
+      }
+
+      // Stratégie 3 : [class*="players"] avec data-n
+      if (count === null) {
+        const s3 = document.querySelector('[class*="players"][data-n]');
+        if (s3) {
+          count = parseInt(s3.getAttribute('data-n'), 10);
+          strategy = 'S3: [class*=players][data-n]';
+        }
+      }
+
+      // Stratégie 4 : .js-players-now data-n direct
+      if (count === null) {
+        const s4 = document.querySelector('.js-players-now');
+        if (s4 && s4.getAttribute('data-n')) {
+          count = parseInt(s4.getAttribute('data-n'), 10);
+          strategy = 'S4: .js-players-now[data-n]';
+        }
+      }
+
+      // Stratégie 5 : regex sur le texte visible
+      if (count === null) {
+        const match = document.body.innerText.match(/(\d[\d,]*)\s*Players? right now/i);
+        if (match) {
+          count = parseInt(match[1].replace(/,/g, ''), 10);
+          strategy = 'S5: regex innerText';
+        }
+      }
+
+      return { count, strategy, html, text };
     });
 
-    return count !== null ? parseInt(count, 10) : null;
+    console.log(`[DEBUG] Stratégie utilisée: ${result.strategy ?? 'AUCUNE'}`);
+    console.log(`[DEBUG] HTML (3000 chars):\n${result.html}`);
+    console.log(`[DEBUG] TEXT (1000 chars):\n${result.text}`);
+
+    return isNaN(result.count) ? null : result.count;
+
   } finally {
     await page.close();
   }
@@ -81,7 +134,7 @@ async function startWorker() {
               await updateMap(map.id, count);
               console.log(`✅ Base44 mis à jour`);
             } else {
-              console.log(`⚠️ data-n introuvable pour ${map.fortnite_id}`);
+              console.log(`⚠️ Aucune stratégie n'a trouvé le chiffre pour ${map.fortnite_id}`);
             }
           } catch (err) {
             console.error(`❌ Erreur sur ${map.fortnite_id}:`, err.message);
