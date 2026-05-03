@@ -1,6 +1,10 @@
 import express from "express";
 import cors from "cors";
-import { chromium } from "playwright";
+import { chromium as playwrightChromium } from "playwright-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
+
+// Register stealth plugin — patches navigator, webdriver flag, plugins, etc.
+playwrightChromium.use(StealthPlugin());
 
 const app = express();
 app.use(cors());
@@ -32,88 +36,155 @@ async function updateMap(id, current_players) {
   });
 }
 
+// Returns true if the page is showing a Cloudflare / security-check wall
+function isSecurityChallenge(html, text) {
+  const lower = (html + text).toLowerCase();
+  return (
+    lower.includes("security check") ||
+    lower.includes("please complete") ||
+    lower.includes("cf-browser-verification") ||
+    lower.includes("challenge-form") ||
+    lower.includes("just a moment") ||
+    lower.includes("enable javascript and cookies")
+  );
+}
+
 async function scrapeCount(browser, fortniteId) {
-  const page = await browser.newPage();
-  try {
-    await page.route('**/*.{png,jpg,jpeg,gif,woff2,woff,ttf}', r => r.abort());
+  const MAX_RETRIES = 3;
 
-    await page.goto(`https://fortnite.gg/island/${fortniteId}`, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const context = await browser.newContext({
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      locale: "en-US",
+      timezoneId: "America/New_York",
+      extraHTTPHeaders: {
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept":
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.google.com/",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1"
+      },
+      viewport: { width: 1280, height: 800 }
     });
 
-    // Laisser le JS de la page s'exécuter
-    await page.waitForTimeout(5000);
+    const page = await context.newPage();
 
-    const result = await page.evaluate(() => {
-      // Debug: dump HTML + texte visible
-      const html = document.body.innerHTML.slice(0, 3000);
-      const text = document.body.innerText.slice(0, 1000);
+    try {
+      // Block heavy assets to speed up load, but keep JS/CSS so Cloudflare can run
+      await page.route('**/*.{png,jpg,jpeg,gif,woff2,woff,ttf,svg,ico}', r => r.abort());
 
-      let count = null;
-      let strategy = null;
+      console.log(`[${fortniteId}] Tentative ${attempt}/${MAX_RETRIES}...`);
 
-      // Stratégie 1 : .js-players-now .chart-stats-title span
-      const s1 = document.querySelector('.js-players-now .chart-stats-title span');
-      if (s1 && s1.innerText.trim()) {
-        count = parseInt(s1.innerText.replace(/[^0-9]/g, ''), 10);
-        strategy = 'S1: .js-players-now .chart-stats-title span';
-      }
+      await page.goto(`https://fortnite.gg/island/${fortniteId}`, {
+        waitUntil: "domcontentloaded",
+        timeout: 45000
+      });
 
-      // Stratégie 2 : .chart-stats-title span (premier)
-      if (count === null) {
-        const s2 = document.querySelector('.chart-stats-title span');
-        if (s2 && s2.innerText.trim()) {
-          count = parseInt(s2.innerText.replace(/[^0-9]/g, ''), 10);
-          strategy = 'S2: .chart-stats-title span';
+      // Give Cloudflare challenge / JS rendering time to complete
+      await page.waitForTimeout(10000);
+
+      const result = await page.evaluate(() => {
+        const html = document.body.innerHTML.slice(0, 3000);
+        const text = document.body.innerText.slice(0, 1000);
+
+        let count = null;
+        let strategy = null;
+
+        // Stratégie 1 : .js-players-now .chart-stats-title span
+        const s1 = document.querySelector('.js-players-now .chart-stats-title span');
+        if (s1 && s1.innerText.trim()) {
+          count = parseInt(s1.innerText.replace(/[^0-9]/g, ''), 10);
+          strategy = 'S1: .js-players-now .chart-stats-title span';
         }
-      }
 
-      // Stratégie 3 : [class*="players"] avec data-n
-      if (count === null) {
-        const s3 = document.querySelector('[class*="players"][data-n]');
-        if (s3) {
-          count = parseInt(s3.getAttribute('data-n'), 10);
-          strategy = 'S3: [class*=players][data-n]';
+        // Stratégie 2 : .chart-stats-title span (premier)
+        if (count === null) {
+          const s2 = document.querySelector('.chart-stats-title span');
+          if (s2 && s2.innerText.trim()) {
+            count = parseInt(s2.innerText.replace(/[^0-9]/g, ''), 10);
+            strategy = 'S2: .chart-stats-title span';
+          }
         }
-      }
 
-      // Stratégie 4 : .js-players-now data-n direct
-      if (count === null) {
-        const s4 = document.querySelector('.js-players-now');
-        if (s4 && s4.getAttribute('data-n')) {
-          count = parseInt(s4.getAttribute('data-n'), 10);
-          strategy = 'S4: .js-players-now[data-n]';
+        // Stratégie 3 : [class*="players"] avec data-n
+        if (count === null) {
+          const s3 = document.querySelector('[class*="players"][data-n]');
+          if (s3) {
+            count = parseInt(s3.getAttribute('data-n'), 10);
+            strategy = 'S3: [class*=players][data-n]';
+          }
         }
-      }
 
-      // Stratégie 5 : regex sur le texte visible
-      if (count === null) {
-        const match = document.body.innerText.match(/(\d[\d,]*)\s*Players? right now/i);
-        if (match) {
-          count = parseInt(match[1].replace(/,/g, ''), 10);
-          strategy = 'S5: regex innerText';
+        // Stratégie 4 : .js-players-now data-n direct
+        if (count === null) {
+          const s4 = document.querySelector('.js-players-now');
+          if (s4 && s4.getAttribute('data-n')) {
+            count = parseInt(s4.getAttribute('data-n'), 10);
+            strategy = 'S4: .js-players-now[data-n]';
+          }
         }
+
+        // Stratégie 5 : regex sur le texte visible
+        if (count === null) {
+          const match = document.body.innerText.match(/(\d[\d,]*)\s*Players? right now/i);
+          if (match) {
+            count = parseInt(match[1].replace(/,/g, ''), 10);
+            strategy = 'S5: regex innerText';
+          }
+        }
+
+        return { count, strategy, html, text };
+      });
+
+      console.log(`[DEBUG] Stratégie utilisée: ${result.strategy ?? 'AUCUNE'}`);
+      console.log(`[DEBUG] HTML (3000 chars):\n${result.html}`);
+      console.log(`[DEBUG] TEXT (1000 chars):\n${result.text}`);
+
+      // Detect security challenge and retry
+      if (isSecurityChallenge(result.html, result.text)) {
+        console.warn(`[${fortniteId}] ⚠️ Security challenge détecté (tentative ${attempt}). Attente avant retry...`);
+        await page.close();
+        await context.close();
+        if (attempt < MAX_RETRIES) {
+          // Back off progressively: 15s, 30s
+          await new Promise(r => setTimeout(r, 15000 * attempt));
+          continue;
+        }
+        console.error(`[${fortniteId}] ❌ Toutes les tentatives bloquées par le security check.`);
+        return null;
       }
 
-      return { count, strategy, html, text };
-    });
+      return isNaN(result.count) ? null : result.count;
 
-    console.log(`[DEBUG] Stratégie utilisée: ${result.strategy ?? 'AUCUNE'}`);
-    console.log(`[DEBUG] HTML (3000 chars):\n${result.html}`);
-    console.log(`[DEBUG] TEXT (1000 chars):\n${result.text}`);
-
-    return isNaN(result.count) ? null : result.count;
-
-  } finally {
-    await page.close();
+    } finally {
+      await page.close();
+      await context.close();
+    }
   }
+
+  return null;
 }
 
 async function startWorker() {
-  console.log("🛠️ Démarrage Playwright...");
-  const browser = await chromium.launch({
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+  console.log("🛠️ Démarrage Playwright (stealth mode)...");
+  const browser = await playwrightChromium.launch({
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-infobars',
+      '--window-size=1280,800',
+      '--start-maximized'
+    ],
+    headless: true
   });
 
   while (true) {
