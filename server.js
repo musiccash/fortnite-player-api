@@ -1,170 +1,91 @@
-import express from "express";
-import cors from "cors";
-import { chromium } from "playwright";
-
+const express = require('express');
 const app = express();
-app.use(cors());
+const PORT = process.env.PORT || 3000;
 
-const PORT = process.env.PORT || 8080;
-const BASE44_APP_ID = process.env.BASE44_APP_ID;
-const BASE44_API_KEY = process.env.BASE44_API_KEY;
-const API = `https://api.base44.app/api/apps/${BASE44_APP_ID}/entities`;
+// ─── CONFIG ────────────────────────────────────────────────────────────────
+const BASE44_APP_ID  = process.env.BASE44_APP_ID;   // ex: abc123
+const BASE44_API_KEY = process.env.BASE44_API_KEY;  // ta clé API base44
+const BASE44_BASE    = `https://api.base44.app/api/apps/${BASE44_APP_ID}/entities`;
+const INTERVAL_MS    = 5 * 60 * 1000; // toutes les 5 minutes
 
-const headers = {
-  "Content-Type": "application/json",
-  "api-key": BASE44_API_KEY
-};
-
-app.get("/", (req, res) => res.send("🚀 SCRAPER BASE44 - READY"));
-app.get("/health", (req, res) => res.status(200).send("OK"));
+// ─── HELPERS ───────────────────────────────────────────────────────────────
 
 async function getMaps() {
-  const res = await fetch(`${API}/RPMap?limit=100`, { headers });
-  const all = await res.json();
-  return Array.isArray(all) ? all.filter(m => m.status === 'online' && m.fortnite_id) : [];
+  const res = await fetch(`${BASE44_BASE}/RPMap?limit=100`, {
+    headers: { 'api-key': BASE44_API_KEY }
+  });
+  const data = await res.json();
+  // data est soit un tableau directement, soit { results: [...] }
+  const items = Array.isArray(data) ? data : (data.results ?? []);
+  return items.filter(m => m.status === 'online' && m.fortnite_id);
 }
 
-async function updateMap(id, current_players) {
-  await fetch(`${API}/RPMap/${id}`, {
-    method: "PUT",
-    headers,
-    body: JSON.stringify({ current_players })
+async function getPlayerCount(fortniteId) {
+  const res = await fetch(
+    `https://api.fortnite.com/ecosystem/v1/islands/${fortniteId}/metrics/minute/peak-ccu`
+  );
+  if (!res.ok) return null;
+  const data = await res.json();
+  // Prendre le dernier intervalle non-null
+  const intervals = data?.intervals ?? [];
+  for (let i = intervals.length - 1; i >= 0; i--) {
+    if (intervals[i].value !== null) return intervals[i].value;
+  }
+  return null;
+}
+
+async function updateMap(mapId, playerCount) {
+  await fetch(`${BASE44_BASE}/RPMap/${mapId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'api-key': BASE44_API_KEY
+    },
+    body: JSON.stringify({ current_players: playerCount })
   });
 }
 
-const BLOCKED_TYPES = new Set([
-  'image', 'stylesheet', 'font', 'media',
-  'texttrack', 'eventsource', 'websocket', 'manifest', 'other'
-]);
+// ─── SYNC PRINCIPALE ───────────────────────────────────────────────────────
 
-const CF_PHRASES = [
-  'security check',
-  'one more step',
-  'checking your browser',
-  'please wait',
-  'cloudflare',
-  'just a moment'
-];
-
-async function scrapeCount(browser, fortniteId) {
-  const page = await browser.newPage();
+async function sync() {
+  console.log(`[${new Date().toISOString()}] 🔄 Démarrage sync...`);
+  
+  let maps;
   try {
-    // Bloquer ressources non essentielles mais garder document/script/xhr/fetch
-    await page.route('**/*', (route) => {
-      if (BLOCKED_TYPES.has(route.request().resourceType())) {
-        route.abort();
-      } else {
-        route.continue();
-      }
-    });
-
-    await page.goto(`https://fortnite.gg/island/${fortniteId}`, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000
-    });
-
-    // Polling 30s : attendre que le challenge CF soit résolu
-    const MAX_WAIT = 30000;
-    const INTERVAL = 2000;
-    let elapsed = 0;
-    let challengeCleared = false;
-
-    while (elapsed < MAX_WAIT) {
-      const bodyText = await page.evaluate(() => document.body.innerText.toLowerCase());
-      const isChallenge = CF_PHRASES.some(p => bodyText.includes(p));
-      if (!isChallenge) {
-        challengeCleared = true;
-        console.log(`✅ Challenge CF résolu après ${elapsed}ms`);
-        break;
-      }
-      await page.waitForTimeout(INTERVAL);
-      elapsed += INTERVAL;
-    }
-
-    if (!challengeCleared) {
-      console.warn(`⚠️ Challenge CF non résolu après ${MAX_WAIT}ms pour ${fortniteId}`);
-      return null;
-    }
-
-    const count = await page.evaluate(() => {
-      // S1 : data-n direct sur .js-players-now
-      const s1 = document.querySelector('.js-players-now');
-      if (s1?.getAttribute('data-n')) return parseInt(s1.getAttribute('data-n'), 10);
-
-      // S2 : span dans .js-players-now
-      const s2 = document.querySelector('.js-players-now .chart-stats-title span');
-      if (s2?.innerText) return parseInt(s2.innerText.replace(/[^0-9]/g, ''), 10);
-
-      // S3 : premier .chart-stats-title span
-      const s3 = document.querySelector('.chart-stats-title span');
-      if (s3?.innerText) return parseInt(s3.innerText.replace(/[^0-9]/g, ''), 10);
-
-      // S4 : regex sur texte visible
-      const match = document.body.innerText.match(/(\d[\d,]*)\s*Players? right now/i);
-      if (match) return parseInt(match[1].replace(/,/g, ''), 10);
-
-      return null;
-    });
-
-    return (count === null || isNaN(count)) ? null : count;
-
-  } finally {
-    await page.close();
+    maps = await getMaps();
+    console.log(`  → ${maps.length} map(s) actives trouvées`);
+  } catch (err) {
+    console.error('  ❌ Erreur récupération maps Base44:', err.message);
+    return;
   }
-}
 
-async function startWorker() {
-  console.log("🛠️ Démarrage Playwright...");
-  const browser = await chromium.launch({
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-extensions',
-      '--disable-plugins',
-      '--disable-background-networking',
-      '--disable-default-apps',
-      '--no-first-run',
-    ]
-  });
-
-  while (true) {
+  for (const map of maps) {
     try {
-      console.log("\n--- NOUVEAU CYCLE ---");
-      const maps = await getMaps();
-
-      if (!maps.length) {
-        console.log("💤 Aucune map active.");
-      } else {
-        console.log(`📍 ${maps.length} maps détectées.`);
-        for (const map of maps) {
-          try {
-            console.log(`🔍 Scraping : ${map.fortnite_id}`);
-            const count = await scrapeCount(browser, map.fortnite_id);
-            if (count !== null) {
-              console.log(`📈 [${map.fortnite_id}] : ${count} joueurs`);
-              await updateMap(map.id, count);
-              console.log(`✅ Base44 mis à jour`);
-            } else {
-              console.log(`⚠️ Impossible de lire le chiffre pour ${map.fortnite_id}`);
-            }
-          } catch (err) {
-            console.error(`❌ Erreur sur ${map.fortnite_id}:`, err.message);
-          }
-          await new Promise(r => setTimeout(r, 2000));
-        }
+      const count = await getPlayerCount(map.fortnite_id);
+      if (count === null) {
+        console.log(`  ⚠️  ${map.title} (${map.fortnite_id}) → pas de données`);
+        continue;
       }
+      await updateMap(map.id, count);
+      console.log(`  ✅ ${map.title} → ${count} joueurs`);
     } catch (err) {
-      console.error("🚨 Erreur critique:", err.message);
+      console.error(`  ❌ ${map.title}:`, err.message);
     }
-
-    console.log("💤 Cycle fini. Attente 60s...");
-    await new Promise(r => setTimeout(r, 60000));
   }
+  
+  console.log(`[${new Date().toISOString()}] ✔ Sync terminée`);
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Serveur prêt sur le port ${PORT}`);
-  startWorker().catch(err => console.error("🚨 Worker failed:", err));
+// ─── DÉMARRAGE ─────────────────────────────────────────────────────────────
+
+app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server démarré sur le port ${PORT}`);
+  if (!BASE44_APP_ID || !BASE44_API_KEY) {
+    console.error('❌ Variables d\'environnement manquantes: BASE44_APP_ID, BASE44_API_KEY');
+    process.exit(1);
+  }
+  sync();
+  setInterval(sync, INTERVAL_MS);
 });
