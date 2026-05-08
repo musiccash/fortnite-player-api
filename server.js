@@ -82,24 +82,53 @@ async function updateMap(id, data) {
 
 // ─── getPlayerCount ──────────────────────────────────────────────────────────
 async function getPlayerCount(fortniteId) {
+  console.log(`[getPlayerCount] fetching fortniteId=${fortniteId}`);
+  const url = `${FORTNITE_API}/${fortniteId}/metrics/minute/peak-ccu`;
+  console.log(`[getPlayerCount] URL: ${url}`);
   try {
-    const res = await fetch(`${FORTNITE_API}/${fortniteId}/metrics/minute/peak-ccu`, {
+    const res = await fetch(url, {
       signal: AbortSignal.timeout(8000),
     });
-    if (!res.ok) return null;
-    const data = await res.json();
+    const text = await res.text();
+    console.log(`[getPlayerCount] status=${res.status} ${res.statusText}`);
+    console.log(`[getPlayerCount] body (first 500): ${text.slice(0, 500)}${text.length > 500 ? '…' : ''}`);
+
+    if (!res.ok) {
+      console.warn(`[getPlayerCount] non-OK response, returning null`);
+      return null;
+    }
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (parseErr) {
+      console.warn(`[getPlayerCount] failed to parse JSON: ${parseErr.message}`);
+      return null;
+    }
+
+    console.log(`[getPlayerCount] trying extraction: data=${JSON.stringify(data?.data)?.slice(0, 100)}`);
     const values = data?.data || data?.metrics || [];
-    if (Array.isArray(values)) {
+    if (Array.isArray(values) && values.length > 0) {
+      console.log(`[getPlayerCount] trying extraction: array values (length=${values.length})`);
       for (let i = values.length - 1; i >= 0; i--) {
         const v = values[i]?.value ?? values[i];
-        if (v != null && v > 0) return v;
+        if (v != null && v > 0) {
+          console.log(`[getPlayerCount] found count via array[${i}]: ${v}`);
+          return v;
+        }
       }
     }
-    return data?.current ?? data?.peak ?? data?.ccu ?? null;
-  } catch {
+
+    console.log(`[getPlayerCount] trying extraction: current=${data?.current}, peak=${data?.peak}, ccu=${data?.ccu}`);
+    const result = data?.current ?? data?.peak ?? data?.ccu ?? null;
+    console.log(`[getPlayerCount] final result: ${result}`);
+    return result;
+  } catch (err) {
+    console.error(`[getPlayerCount] error for fortniteId=${fortniteId}: ${err.message}`);
     return null;
   }
 }
+
 
 // ─── syncPlayers ─────────────────────────────────────────────────────────────
 let syncCount = 0, lastSync = null;
@@ -112,8 +141,13 @@ async function syncPlayers() {
     const mapsWithId = maps.filter(m => m.fortnite_id);
     await Promise.all(mapsWithId.map(async (map) => {
       try {
+        console.log(`[sync] fetching player count for "${map.title}" (fortnite_id=${map.fortnite_id})`);
         const count = await getPlayerCount(map.fortnite_id);
-        if (count == null) return;
+        if (count == null) {
+          console.warn(`[sync] count is null for "${map.title}" — skipping updateMap`);
+          return;
+        }
+        console.log(`[sync] calling updateMap for "${map.title}" with current_players=${count}`);
         await updateMap(map.id, { current_players: count });
         console.log(`  ✓ ${map.title}: ${count} joueurs`);
       } catch (err) {
@@ -128,6 +162,7 @@ async function syncPlayers() {
     console.error(`[sync] Erreur: ${err.message}`);
   }
 }
+
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({ status: 'ok', sync_count: syncCount, last_sync: lastSync }));
