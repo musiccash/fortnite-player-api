@@ -2,90 +2,75 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ─── CONFIG ────────────────────────────────────────────────────────────────
-const BASE44_APP_ID  = process.env.BASE44_APP_ID;   // ex: abc123
-const BASE44_API_KEY = process.env.BASE44_API_KEY;  // ta clé API base44
-const BASE44_BASE    = `https://api.base44.app/api/apps/${BASE44_APP_ID}/entities`;
-const INTERVAL_MS    = 5 * 60 * 1000; // toutes les 5 minutes
+const BASE44_APP_ID  = process.env.BASE44_APP_ID;
+const BASE44_API_KEY = process.env.BASE44_API_KEY;
+const SYNC_INTERVAL  = parseInt(process.env.SYNC_INTERVAL_MS || '60000');
 
-// ─── HELPERS ───────────────────────────────────────────────────────────────
+if (!BASE44_APP_ID || !BASE44_API_KEY) {
+  console.error('❌ BASE44_APP_ID et BASE44_API_KEY sont requis');
+  process.exit(1);
+}
+
+const BASE44_BASE = `https://api.base44.com/api/apps/${BASE44_APP_ID}/entities`;
+const FORTNITE_API = 'https://api.fortnite.com/ecosystem/v1/islands';
+const headers44 = { 'Content-Type': 'application/json', 'api-key': BASE44_API_KEY };
 
 async function getMaps() {
-  const res = await fetch(`${BASE44_BASE}/RPMap?limit=100`, {
-    headers: { 'api-key': BASE44_API_KEY }
+  const res = await fetch(`${BASE44_BASE}/RPMap/filter`, {
+    method: 'POST', headers: headers44,
+    body: JSON.stringify({ filters: { status: 'online' }, sort: '-created_date', limit: 100 }),
   });
-  const data = await res.json();
-  // data est soit un tableau directement, soit { results: [...] }
-  const items = Array.isArray(data) ? data : (data.results ?? []);
-  return items.filter(m => m.status === 'online' && m.fortnite_id);
+  if (!res.ok) throw new Error(`getMaps: ${res.status}`);
+  return res.json();
+}
+
+async function updateMap(id, data) {
+  const res = await fetch(`${BASE44_BASE}/RPMap/${id}`, {
+    method: 'PUT', headers: headers44, body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`updateMap ${id}: ${res.status}`);
 }
 
 async function getPlayerCount(fortniteId) {
-  const res = await fetch(
-    `https://api.fortnite.com/ecosystem/v1/islands/${fortniteId}/metrics/minute/peak-ccu`
-  );
+  const res = await fetch(`${FORTNITE_API}/${fortniteId}/metrics/minute/peak-ccu`, { signal: AbortSignal.timeout(8000) });
   if (!res.ok) return null;
   const data = await res.json();
-  // Prendre le dernier intervalle non-null
-  const intervals = data?.intervals ?? [];
-  for (let i = intervals.length - 1; i >= 0; i--) {
-    if (intervals[i].value !== null) return intervals[i].value;
-  }
-  return null;
-}
-
-async function updateMap(mapId, playerCount) {
-  await fetch(`${BASE44_BASE}/RPMap/${mapId}`, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'api-key': BASE44_API_KEY
-    },
-    body: JSON.stringify({ current_players: playerCount })
-  });
-}
-
-// ─── SYNC PRINCIPALE ───────────────────────────────────────────────────────
-
-async function sync() {
-  console.log(`[${new Date().toISOString()}] 🔄 Démarrage sync...`);
-  
-  let maps;
-  try {
-    maps = await getMaps();
-    console.log(`  → ${maps.length} map(s) actives trouvées`);
-  } catch (err) {
-    console.error('  ❌ Erreur récupération maps Base44:', err.message);
-    return;
-  }
-
-  for (const map of maps) {
-    try {
-      const count = await getPlayerCount(map.fortnite_id);
-      if (count === null) {
-        console.log(`  ⚠️  ${map.title} (${map.fortnite_id}) → pas de données`);
-        continue;
-      }
-      await updateMap(map.id, count);
-      console.log(`  ✅ ${map.title} → ${count} joueurs`);
-    } catch (err) {
-      console.error(`  ❌ ${map.title}:`, err.message);
+  const values = data?.data || data?.metrics || [];
+  if (Array.isArray(values)) {
+    for (let i = values.length - 1; i >= 0; i--) {
+      const v = values[i]?.value ?? values[i];
+      if (v != null && v > 0) return v;
     }
   }
-  
-  console.log(`[${new Date().toISOString()}] ✔ Sync terminée`);
+  return data?.current ?? data?.peak ?? data?.ccu ?? null;
 }
 
-// ─── DÉMARRAGE ─────────────────────────────────────────────────────────────
+let syncCount = 0, lastSync = null;
 
-app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
+async function syncPlayers() {
+  try {
+    const maps = await getMaps();
+    const mapsWithId = maps.filter(m => m.fortnite_id);
+    await Promise.all(mapsWithId.map(async (map) => {
+      try {
+        const count = await getPlayerCount(map.fortnite_id);
+        if (count == null) return;
+        await updateMap(map.id, { current_players: count });
+        console.log(`  ✓ ${map.title}: ${count} joueurs`);
+      } catch (err) { console.warn(`  ✗ ${map.title}: ${err.message}`); }
+    }));
+    syncCount++;
+    lastSync = new Date().toISOString();
+    console.log(`[sync #${syncCount}] ${lastSync}`);
+  } catch (err) { console.error(`[sync] Erreur: ${err.message}`); }
+}
+
+app.get('/', (req, res) => res.json({ status: 'ok', sync_count: syncCount, last_sync: lastSync }));
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/sync', async (req, res) => { await syncPlayers(); res.json({ status: 'ok' }); });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server démarré sur le port ${PORT}`);
-  if (!BASE44_APP_ID || !BASE44_API_KEY) {
-    console.error('❌ Variables d\'environnement manquantes: BASE44_APP_ID, BASE44_API_KEY');
-    process.exit(1);
-  }
-  sync();
-  setInterval(sync, INTERVAL_MS);
+  console.log(`🚀 Démarré sur :${PORT}`);
+  syncPlayers();
+  setInterval(syncPlayers, SYNC_INTERVAL);
 });
