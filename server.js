@@ -104,20 +104,37 @@ async function getPlayerCount(fortniteId) {
       return null;
     }
 
-    // Tentative 1 : tableau dans data.data ou data.metrics
-    const values = data?.data || data?.metrics || [];
-    if (Array.isArray(values) && values.length > 0) {
-      for (let i = values.length - 1; i >= 0; i--) {
-        const v = values[i]?.value ?? values[i];
-        if (v != null && v > 0) {
-          console.log(`[getPlayerCount] trouvé via tableau[${i}]=${v} pour ${fortniteId}`);
-          return v;
-        }
-      }
-      console.log(`[getPlayerCount] tableau présent (${values.length} entrées) mais toutes à 0/null pour ${fortniteId}`);
+    // Tentative 1 : tableau intervals (format Fortnite API natif)
+    if (Array.isArray(data?.intervals) && data.intervals.length > 0) {
+      const last = data.intervals[data.intervals.length - 1];
+      const v = last?.value ?? null;
+      console.log(`[getPlayerCount] trouvé via intervals[${data.intervals.length - 1}].value=${v} (timestamp=${last?.timestamp}) pour ${fortniteId}`);
+      if (v != null) return v;
     }
 
-    // Tentative 2 : scalaires de repli
+    // Tentative 2 : tableau dans data.data
+    if (Array.isArray(data?.data) && data.data.length > 0) {
+      const last = data.data[data.data.length - 1];
+      const v = last?.value ?? last ?? null;
+      if (v != null) {
+        console.log(`[getPlayerCount] trouvé via data[${data.data.length - 1}].value=${v} pour ${fortniteId}`);
+        return v;
+      }
+      console.log(`[getPlayerCount] tableau data présent (${data.data.length} entrées) mais valeur null pour ${fortniteId}`);
+    }
+
+    // Tentative 3 : tableau dans data.metrics
+    if (Array.isArray(data?.metrics) && data.metrics.length > 0) {
+      const last = data.metrics[data.metrics.length - 1];
+      const v = last?.value ?? last ?? null;
+      if (v != null) {
+        console.log(`[getPlayerCount] trouvé via metrics[${data.metrics.length - 1}].value=${v} pour ${fortniteId}`);
+        return v;
+      }
+      console.log(`[getPlayerCount] tableau metrics présent (${data.metrics.length} entrées) mais valeur null pour ${fortniteId}`);
+    }
+
+    // Tentative 4 : scalaires de repli
     const scalar = data?.current ?? data?.peak ?? data?.ccu ?? null;
     if (scalar != null) {
       console.log(`[getPlayerCount] trouvé via scalaire=${scalar} pour ${fortniteId}`);
@@ -131,6 +148,7 @@ async function getPlayerCount(fortniteId) {
     console.error(`[getPlayerCount] exception pour ${fortniteId}: ${err.message} — retourne null`);
     return null;
   }
+
 }
 
 // ─── syncPlayers ─────────────────────────────────────────────────────────────
