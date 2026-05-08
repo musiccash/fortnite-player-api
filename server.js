@@ -53,7 +53,6 @@ async function getMaps() {
   for (const attempt of attempts) {
     try {
       const data = await attempt();
-      // Normalise : tableau direct, ou { data/results/items: [...] }
       return Array.isArray(data) ? data : (data?.data ?? data?.results ?? data?.items ?? []);
     } catch (err) {
       console.warn(`[getMaps] tentative échouée : ${err.message}`);
@@ -80,23 +79,56 @@ async function updateMap(id, data) {
   throw new Error(`updateMap ${id} : tous les endpoints ont échoué`);
 }
 
-// ─── getPlayerCount ──────────────────────────────────────────────────────────
+// ─── getPlayerCount : logs complets à chaque étape ──────────────────────────
 async function getPlayerCount(fortniteId) {
+  const url = `${FORTNITE_API}/${fortniteId}/metrics/minute/peak-ccu`;
+  console.log(`[getPlayerCount] → fortniteId=${fortniteId} | url=${url}`);
+
   try {
-    const res = await fetch(`${FORTNITE_API}/${fortniteId}/metrics/minute/peak-ccu`, {
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const text = await res.text();
+
+    console.log(`[getPlayerCount] ← ${res.status} ${res.statusText} | fortniteId=${fortniteId}`);
+    console.log(`[getPlayerCount]   response: ${text.slice(0, 500)}${text.length > 500 ? '…' : ''}`);
+
+    if (!res.ok) {
+      console.warn(`[getPlayerCount] HTTP ${res.status} pour ${fortniteId} — retourne null`);
+      return null;
+    }
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (parseErr) {
+      console.warn(`[getPlayerCount] JSON invalide pour ${fortniteId}: ${parseErr.message} — retourne null`);
+      return null;
+    }
+
+    // Tentative 1 : tableau dans data.data ou data.metrics
     const values = data?.data || data?.metrics || [];
-    if (Array.isArray(values)) {
+    if (Array.isArray(values) && values.length > 0) {
       for (let i = values.length - 1; i >= 0; i--) {
         const v = values[i]?.value ?? values[i];
-        if (v != null && v > 0) return v;
+        if (v != null && v > 0) {
+          console.log(`[getPlayerCount] trouvé via tableau[${i}]=${v} pour ${fortniteId}`);
+          return v;
+        }
       }
+      console.log(`[getPlayerCount] tableau présent (${values.length} entrées) mais toutes à 0/null pour ${fortniteId}`);
     }
-    return data?.current ?? data?.peak ?? data?.ccu ?? null;
-  } catch {
+
+    // Tentative 2 : scalaires de repli
+    const scalar = data?.current ?? data?.peak ?? data?.ccu ?? null;
+    if (scalar != null) {
+      console.log(`[getPlayerCount] trouvé via scalaire=${scalar} pour ${fortniteId}`);
+      return scalar;
+    }
+
+    console.warn(`[getPlayerCount] aucune valeur exploitable dans la réponse pour ${fortniteId} — retourne null`);
+    return null;
+
+  } catch (err) {
+    console.error(`[getPlayerCount] exception pour ${fortniteId}: ${err.message} — retourne null`);
     return null;
   }
 }
@@ -107,25 +139,30 @@ let syncCount = 0, lastSync = null;
 async function syncPlayers() {
   try {
     const maps = await getMaps();
-    console.log(`[sync] ${maps.length} maps récupérées, ${maps.filter(m => m.fortnite_id).length} avec fortnite_id`);
-
     const mapsWithId = maps.filter(m => m.fortnite_id);
+    console.log(`[sync] ${maps.length} maps récupérées, ${mapsWithId.length} avec fortnite_id`);
+
     await Promise.all(mapsWithId.map(async (map) => {
+      console.log(`[sync] → fetch joueurs pour "${map.title}" (fortnite_id=${map.fortnite_id})`);
       try {
         const count = await getPlayerCount(map.fortnite_id);
-        if (count == null) return;
+        if (count == null) {
+          console.warn(`[sync] ⚠ count=null pour "${map.title}" (fortnite_id=${map.fortnite_id}) — mise à jour ignorée`);
+          return;
+        }
+        console.log(`[sync] → updateMap id=${map.id} "${map.title}" current_players=${count}`);
         await updateMap(map.id, { current_players: count });
-        console.log(`  ✓ ${map.title}: ${count} joueurs`);
+        console.log(`[sync] ✓ "${map.title}": ${count} joueurs`);
       } catch (err) {
-        console.warn(`  ✗ ${map.title}: ${err.message}`);
+        console.warn(`[sync] ✗ "${map.title}": ${err.message}`);
       }
     }));
 
     syncCount++;
     lastSync = new Date().toISOString();
-    console.log(`[sync #${syncCount}] ${lastSync}`);
+    console.log(`[sync #${syncCount}] terminé à ${lastSync}`);
   } catch (err) {
-    console.error(`[sync] Erreur: ${err.message}`);
+    console.error(`[sync] Erreur fatale: ${err.message}`);
   }
 }
 
